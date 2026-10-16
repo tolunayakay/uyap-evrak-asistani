@@ -3,23 +3,57 @@ import io
 import re
 import sys
 import datetime
+import threading
 import zipfile
 import xml.etree.ElementTree as ET
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, scrolledtext
-from tkinterdnd2 import TkinterDnD, DND_FILES
-import pymupdf  # PyMuPDF API
-from PIL import Image, ImageTk
+from tkinter import filedialog, messagebox, simpledialog
+from PIL import Image, ImageOps
 import docx
+import pymupdf  # PyMuPDF
+import customtkinter as ctk
 
-DESTEKLENEN_UZANTILAR = ('.pdf', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.udf')
+# Word -> PDF dönüştürücü desteği
+try:
+    from docx2pdf import convert as docx_to_pdf_convert
+except ImportError:
+    docx_to_pdf_convert = None
 
-# Türkçe karakter destekli sistem fontunu belirle
-TURKCE_FONT_YOLU = "C:/Windows/Fonts/arial.ttf" if os.path.exists("C:/Windows/Fonts/arial.ttf") else None
+# TkinterDnD2 CustomTkinter Entegrasyonu
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    class CTkDnD(ctk.CTk, TkinterDnD.DnDWrapper):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.TkdndVersion = TkinterDnD._require(self)
+except ImportError:
+    CTkDnD = ctk.CTk
+    DND_FILES = None
+
+ctk.set_appearance_mode("Light")
+ctk.set_default_color_theme("blue")
+
+DESTEKLENEN_UZANTILAR = ('.pdf', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.udf', '.docx')
+
+
+def sistem_turkce_font_bul():
+    windir = os.environ.get("WINDIR", "C:\\Windows")
+    font_adaylari = [
+        os.path.join(windir, "Fonts", "arial.ttf"),
+        os.path.join(windir, "Fonts", "calibri.ttf"),
+        os.path.join(windir, "Fonts", "segoeui.ttf"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/Helvetica.ttc"
+    ]
+    for yol in font_adaylari:
+        if os.path.exists(yol):
+            return yol
+    return None
+
+TURKCE_FONT_YOLU = sistem_turkce_font_bul()
 
 
 def resource_path(relative_path):
-    """PyInstaller --onefile derlemesinde geçici klasördeki kaynakları bulur."""
     try:
         base_path = sys._MEIPASS
     except Exception:
@@ -27,1209 +61,719 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
-class UyapEvrakAsistaniApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("UYAP Evrak Asistanı")
-        self.root.geometry("930x630")
-        self.root.resizable(False, False)
-        self.root.configure(bg="#F4F6F9")
+def tc_kimlik_dogrula(tc_no: str) -> bool:
+    if not re.match(r'^[1-9]\d{10}$', tc_no):
+        return False
+    b = [int(ch) for ch in tc_no]
+    tekler = sum(b[0:9:2])
+    ciftler = sum(b[1:8:2])
+    if ((tekler * 7) - ciftler) % 10 != b[9]:
+        return False
+    if sum(b[:10]) % 10 != b[10]:
+        return False
+    return True
 
-        # Otomatik Logo & İkon Entegrasyonu
-        self._uygulama_ikonu_yukle()
+
+def sayfa_araligi_ayristir(metin: str, toplam_sayfa: int):
+    if not metin or not metin.strip():
+        return set(range(toplam_sayfa))
+
+    secilenler = set()
+    parcalar = [p.strip() for p in metin.split(',') if p.strip()]
+    if not parcalar:
+        return set(range(toplam_sayfa))
+
+    for p in parcalar:
+        if '-' in p:
+            alt = p.split('-')
+            if len(alt) != 2:
+                raise ValueError(f"Geçersiz aralık formatı: '{p}'")
+            b, s = int(alt[0].strip()), int(alt[1].strip())
+            if b > s:
+                raise ValueError(f"Aralık başlangıcı bitişten büyük olamaz: '{p}'")
+            if b < 1 or s > toplam_sayfa:
+                raise ValueError(f"Sayfa aralığı 1 ile {toplam_sayfa} arasında olmalıdır: '{p}'")
+            for i in range(b, s + 1):
+                secilenler.add(i - 1)
+        else:
+            s = int(p)
+            if s < 1 or s > toplam_sayfa:
+                raise ValueError(f"Geçersiz sayfa numarası: {s} (Belge 1-{toplam_sayfa} arasıdır)")
+            secilenler.add(s - 1)
+    return secilenler
+
+
+class ModernUyapAsistani(CTkDnD):
+    def __init__(self):
+        super().__init__()
+        self.title("UYAP Evrak Asistanı")
+        self.geometry("1100x700")
+        self.minsize(1040, 650)
+        self.configure(fg_color="#F8FAFC")
 
         self.dosyalar = []
-
-        # --- ÜST BAŞLIK ALANI ---
-        baslik_cerceve = tk.Frame(root, bg="#1B263B", pady=8)
-        baslik_cerceve.pack(fill="x")
-        
-        baslik_ic = tk.Frame(baslik_cerceve, bg="#1B263B")
-        baslik_ic.pack(fill="x", padx=16)
-
-        tk.Label(
-            baslik_ic,
-            text="⚖ UYAP EVRAK ASİSTANI",
-            font=("Segoe UI", 15, "bold"),
-            fg="#FFFFFF",
-            bg="#1B263B"
-        ).pack(side="left")
-
-        tk.Label(
-            baslik_ic,
-            text="by Tol",
-            font=("Segoe UI", 9, "italic", "bold"),
-            fg="#DDA15E",
-            bg="#1B263B"
-        ).pack(side="left", padx=(10, 0))
-
-        tk.Button(
-            baslik_ic,
-            text="❓ Nasıl Kullanılır? (Detaylı Rehber)",
-            command=self.rehber_penceresi_ac,
-            bg="#3A506B",
-            fg="#FFFFFF",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            padx=10,
-            pady=3
-        ).pack(side="right")
-
-        # --- ANA GÖVDE (İKİ SÜTUN) ---
-        govde = tk.Frame(root, bg="#F4F6F9", padx=12, pady=8)
-        govde.pack(fill="both", expand=True)
-
-        # SOL SÜTUN: LİSTE
-        sol_sutun = tk.Frame(govde, bg="#F4F6F9")
-        sol_sutun.pack(side="left", fill="both", expand=True, padx=(0, 10))
-
-        liste_cerceve = tk.LabelFrame(
-            sol_sutun,
-            text=" 📂 İşlenecek Dosyalar (PDF, Görsel, UDF Sürükleyebilirsiniz) ",
-            font=("Segoe UI", 9, "bold"),
-            bg="#F4F6F9",
-            fg="#1B263B",
-            padx=8,
-            pady=6
-        )
-        liste_cerceve.pack(fill="both", expand=True)
-
-        self.dosya_listebox = tk.Listbox(
-            liste_cerceve,
-            selectmode=tk.SINGLE,
-            font=("Segoe UI", 9),
-            bg="#FFFFFF",
-            relief="solid",
-            bd=1
-        )
-        self.dosya_listebox.pack(side="left", fill="both", expand=True)
-
-        self.dosya_listebox.drop_target_register(DND_FILES)
-        self.dosya_listebox.dnd_bind('<<Drop>>', self.dosyalari_surukle_birak)
-
-        kaydirma = tk.Scrollbar(liste_cerceve, orient="vertical", command=self.dosya_listebox.yview)
-        kaydirma.pack(side="right", fill="y")
-        self.dosya_listebox.config(yscrollcommand=kaydirma.set)
-
-        # Liste Altı Butonları
-        liste_btn_cerceve = tk.Frame(sol_sutun, bg="#F4F6F9")
-        liste_btn_cerceve.pack(fill="x", pady=(6, 0))
-
-        tk.Button(
-            liste_btn_cerceve,
-            text="➕ Dosya Ekle",
-            command=self.dosya_ekle_dialog,
-            bg="#0D6EFD",
-            fg="white",
-            font=("Segoe UI", 9, "bold"),
-            relief="flat",
-            padx=10,
-            pady=4
-        ).pack(side="left", padx=2)
-
-        tk.Button(
-            liste_btn_cerceve,
-            text="➖ Seçileni Kaldır",
-            command=self.secileni_sil,
-            bg="#6C757D",
-            fg="white",
-            font=("Segoe UI", 9),
-            relief="flat",
-            padx=8,
-            pady=4
-        ).pack(side="left", padx=2)
-
-        tk.Button(
-            liste_btn_cerceve,
-            text="🗑 Listeyi Temizle",
-            command=self.listeyi_temizle,
-            bg="#DC3545",
-            fg="white",
-            font=("Segoe UI", 9),
-            relief="flat",
-            padx=8,
-            pady=4
-        ).pack(side="right", padx=2)
-
-        # SAĞ SÜTUN: AYARLAR VE İŞLEMLER
-        sag_sutun = tk.Frame(govde, bg="#F4F6F9", width=380)
-        sag_sutun.pack(side="right", fill="y")
-        sag_sutun.pack_propagate(False)
-
-        # 1. Sıkıştırma Seviyesi
-        ayar_cerceve = tk.LabelFrame(
-            sag_sutun,
-            text=" ⚙ PDF Kalite & Sıkıştırma ",
-            font=("Segoe UI", 8, "bold"),
-            bg="#F4F6F9",
-            fg="#1B263B",
-            padx=8,
-            pady=2
-        )
-        ayar_cerceve.pack(fill="x", pady=(0, 3))
-
-        self.mod_secimi = tk.StringVar(value="standart")
-        tk.Radiobutton(
-            ayar_cerceve,
-            text="Dengeli (150 DPI)",
-            variable=self.mod_secimi,
-            value="standart",
-            bg="#F4F6F9",
-            font=("Segoe UI", 8)
-        ).pack(side="left", padx=5)
-
-        tk.Radiobutton(
-            ayar_cerceve,
-            text="Maksimum Sıkıştırma (100 DPI)",
-            variable=self.mod_secimi,
-            value="maksimum",
-            bg="#F4F6F9",
-            font=("Segoe UI", 8)
-        ).pack(side="left", padx=5)
-
-        # 2. Bates Numaralandırma
-        bates_cerceve = tk.LabelFrame(
-            sag_sutun,
-            text=" 🏷 Ek Etiketi / Bates ",
-            font=("Segoe UI", 8, "bold"),
-            bg="#F4F6F9",
-            fg="#1B263B",
-            padx=8,
-            pady=2
-        )
-        bates_cerceve.pack(fill="x", pady=(0, 3))
-
-        self.bates_aktif = tk.BooleanVar(value=False)
-        self.bates_check = tk.Checkbutton(
-            bates_cerceve,
-            text="Sayfa Altına Numara Bas",
-            variable=self.bates_aktif,
-            command=self._bates_durum_guncelle,
-            bg="#F4F6F9",
-            font=("Segoe UI", 8, "bold"),
-            fg="#0D6EFD"
-        )
-        self.bates_check.pack(side="left")
-
-        tk.Label(bates_cerceve, text="Etiket:", bg="#F4F6F9", font=("Segoe UI", 8)).pack(side="left", padx=(10, 2))
-        self.bates_on_ek = tk.Entry(bates_cerceve, font=("Segoe UI", 8), width=8)
-        self.bates_on_ek.insert(0, "EK-1")
-        self.bates_on_ek.config(state="disabled")
-        self.bates_on_ek.pack(side="left")
-
-        # 3. İşlem Butonları Paneli
-        islem_cerceve = tk.LabelFrame(
-            sag_sutun,
-            text=" ⚡ İşlemler ",
-            font=("Segoe UI", 8, "bold"),
-            bg="#F4F6F9",
-            fg="#1B263B",
-            padx=8,
-            pady=3
-        )
-        islem_cerceve.pack(fill="both", expand=True)
-
-        # Birleştirme & Sıkıştırma Satırı
-        birlestir_bar = tk.Frame(islem_cerceve, bg="#F4F6F9")
-        birlestir_bar.pack(fill="x", pady=1)
-
-        tk.Button(
-            birlestir_bar,
-            text="📑 PDF'leri Birleştir",
-            command=self.tumunu_birlestir_pdf_yap,
-            bg="#198754",
-            fg="white",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            pady=3
-        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
-
-        tk.Button(
-            birlestir_bar,
-            text="🗜 PDF Sıkıştır",
-            command=self.pdf_tekil_sikistir,
-            bg="#FD7E14",
-            fg="white",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            pady=3
-        ).pack(side="right", fill="x", expand=True, padx=(2, 0))
-
-        # Bölme Satırı
-        bolme_bar = tk.Frame(islem_cerceve, bg="#F4F6F9")
-        bolme_bar.pack(fill="x", pady=1)
-
-        tk.Button(
-            bolme_bar,
-            text="✂ Sayfa Böl",
-            command=self.pdf_sayfa_sayfa_bol,
-            bg="#6F42C1",
-            fg="white",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            pady=3
-        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
-
-        tk.Button(
-            bolme_bar,
-            text="🎯 Aralık Ayır",
-            command=self.pdf_aralik_bol,
-            bg="#495057",
-            fg="white",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            pady=3
-        ).pack(side="right", fill="x", expand=True, padx=(2, 0))
-
-        # Akıllı UYAP Boyut Bölücü
-        tk.Button(
-            islem_cerceve,
-            text="⚖ Akıllı UYAP Boyut Bölücüsü (MB Sınırına Göre)",
-            command=self.pdf_akilli_boyut_bol,
-            bg="#028090",
-            fg="white",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            pady=3
-        ).pack(fill="x", pady=1)
-
-        # Sayfa Döndürme & Boş Sayfa Temizleme
-        don_bos_bar = tk.Frame(islem_cerceve, bg="#F4F6F9")
-        don_bos_bar.pack(fill="x", pady=1)
-
-        tk.Button(
-            don_bos_bar,
-            text="🔄 Sayfa Döndür (90°)",
-            command=self.pdf_dondur_penceresi,
-            bg="#0582CA",
-            fg="white",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            pady=3
-        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
-
-        tk.Button(
-            don_bos_bar,
-            text="🧹 Boş Sayfaları Temizle",
-            command=self.pdf_bos_sayfalari_temizle,
-            bg="#588157",
-            fg="white",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            pady=3
-        ).pack(side="right", fill="x", expand=True, padx=(2, 0))
-
-        # Aslı Gibidir Kaşesi (Tek başına tam genişlikte buton)
-        tk.Button(
-            islem_cerceve,
-            text="🛡 'Aslı Gibidir' Kaşesi",
-            command=self.pdf_kase_ekle_penceresi,
-            bg="#C1121F",
-            fg="white",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            pady=3
-        ).pack(fill="x", pady=1)
-
-        # KVKK Karartma
-        tk.Button(
-            islem_cerceve,
-            text="🕶 KVKK Akıllı Karartma (T.C., IBAN Gizle)",
-            command=self.akilli_karartma_penceresi,
-            bg="#212529",
-            fg="#FFC107",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            pady=3
-        ).pack(fill="x", pady=1)
-
-        # UDF ➔ Word & OCR
-        udf_ocr_bar = tk.Frame(islem_cerceve, bg="#F4F6F9")
-        udf_ocr_bar.pack(fill="x", pady=1)
-
-        tk.Button(
-            udf_ocr_bar,
-            text="📄 UDF ➔ Word (.docx)",
-            command=self.udf_to_word,
-            bg="#157347",
-            fg="white",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            pady=3
-        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
-
-        tk.Button(
-            udf_ocr_bar,
-            text="🔍 Metin Kopyala",
-            command=self.metin_oku_penceresi,
-            bg="#023E8A",
-            fg="white",
-            font=("Segoe UI", 8, "bold"),
-            relief="flat",
-            pady=3
-        ).pack(side="right", fill="x", expand=True, padx=(2, 0))
-
-        # Durum Çubuğu
-        self.durum_etiketi = tk.Label(
-            root,
-            text="Hazır. PDF, Görsel veya UDF dosyalarını sol alana sürükleyebilirsiniz.",
-            font=("Segoe UI", 9),
-            bg="#E9ECEF",
-            fg="#495057",
-            anchor="w",
-            padx=12,
-            pady=4
-        )
-        self.durum_etiketi.pack(fill="x", side="bottom")
+        self._uygulama_ikonu_yukle()
+        self._arayuz_olustur()
 
     def _uygulama_ikonu_yukle(self):
-        """Pencere simgesini .ico veya .png dosyasından yükler."""
-        ico_yolu = resource_path("logo.ico")
-        png_yolu = resource_path("logo.png")
-
-        if os.path.exists(ico_yolu):
+        ico = resource_path("logo.ico")
+        if os.path.exists(ico):
             try:
-                self.root.iconbitmap(ico_yolu)
-                return
+                self.iconbitmap(default=ico)
             except Exception:
                 pass
 
-        if os.path.exists(png_yolu):
+    def _arayuz_olustur(self):
+        # 1. ÜST HEADER
+        header = ctk.CTkFrame(self, fg_color="#FFFFFF", height=64, corner_radius=0, border_width=1, border_color="#E2E8F0")
+        header.pack(fill="x", side="top")
+        header.pack_propagate(False)
+
+        logo_alani = ctk.CTkFrame(header, fg_color="transparent")
+        logo_alani.pack(side="left", padx=24, pady=12)
+
+        ctk.CTkLabel(
+            logo_alani,
+            text="⚖ UYAP Evrak Asistanı",
+            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            text_color="#0F172A"
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            logo_alani,
+            text="PRO",
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            fg_color="#EEF2F6",
+            text_color="#475569",
+            corner_radius=6,
+            padx=7,
+            pady=2
+        ).pack(side="left", padx=10)
+
+        ctk.CTkButton(
+            header,
+            text="Rehber & Kılavuz",
+            command=self.rehber_penceresi_ac,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#334155",
+            corner_radius=8,
+            width=120,
+            height=32
+        ).pack(side="right", padx=24)
+
+        # 2. ALT DURUM ÇUBUĞU
+        alt_bar = ctk.CTkFrame(self, fg_color="#FFFFFF", height=38, corner_radius=0, border_width=1, border_color="#E2E8F0")
+        alt_bar.pack(fill="x", side="bottom")
+        alt_bar.pack_propagate(False)
+
+        self.progress_bar = ctk.CTkProgressBar(alt_bar, width=140, height=8, mode="indeterminate", corner_radius=4)
+        self.progress_bar.pack(side="right", padx=16, pady=14)
+        self.progress_bar.set(0)
+
+        self.durum_etiketi = ctk.CTkLabel(
+            alt_bar,
+            text="Hazır. Evraklarınızı sol alana sürükleyebilir veya 'Dosya Ekle' ile seçebilirsiniz.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#64748B"
+        )
+        self.durum_etiketi.pack(side="left", padx=18)
+
+        # 3. ANA GÖVDE
+        govde = ctk.CTkFrame(self, fg_color="transparent")
+        govde.pack(fill="both", expand=True, padx=20, pady=16)
+
+        # SOL KART
+        sol_kart = ctk.CTkFrame(govde, fg_color="#FFFFFF", corner_radius=12, border_width=1, border_color="#E2E8F0")
+        sol_kart.pack(side="left", fill="both", expand=True, padx=(0, 10))
+
+        sol_baslik_satir = ctk.CTkFrame(sol_kart, fg_color="transparent")
+        sol_baslik_satir.pack(fill="x", padx=16, pady=(16, 8))
+
+        ctk.CTkLabel(
+            sol_baslik_satir,
+            text="İŞLENECEK DOSYALAR",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color="#94A3B8"
+        ).pack(side="left")
+
+        self.dosya_sayisi_badge = ctk.CTkLabel(
+            sol_baslik_satir,
+            text="0 dosya",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#64748B"
+        )
+        self.dosya_sayisi_badge.pack(side="right")
+
+        self.liste_frame = ctk.CTkScrollableFrame(sol_kart, fg_color="#F8FAFC", corner_radius=8)
+        self.liste_frame.pack(fill="both", expand=True, padx=16, pady=6)
+
+        self.bos_bilgi_etiketi = ctk.CTkLabel(
+            self.liste_frame,
+            text="Belgeleri buraya sürükleyin\nveya aşağıdaki butondan ekleyin\n(PDF, Word, Görsel, UDF)",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#94A3B8"
+        )
+        self.bos_bilgi_etiketi.pack(pady=120)
+
+        if DND_FILES:
             try:
-                img = Image.open(png_yolu)
-                self._icon_img = ImageTk.PhotoImage(img)
-                self.root.iconphoto(True, self._icon_img)
+                self.drop_target_register(DND_FILES)
+                self.dnd_bind('<<Drop>>', self.dosyalari_surukle_birak)
             except Exception:
                 pass
 
-    def _bates_durum_guncelle(self):
+        liste_alt_bar = ctk.CTkFrame(sol_kart, fg_color="transparent")
+        liste_alt_bar.pack(fill="x", padx=16, pady=(10, 16))
+
+        ctk.CTkButton(
+            liste_alt_bar,
+            text="➕ Dosya Ekle",
+            command=self.dosya_ekle_dialog,
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            fg_color="#0F172A",
+            hover_color="#1E293B",
+            corner_radius=8,
+            height=34
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            liste_alt_bar,
+            text="▲",
+            command=lambda: self._dosya_sirala(-1),
+            width=36,
+            height=34,
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#334155",
+            corner_radius=8
+        ).pack(side="left", padx=2)
+
+        ctk.CTkButton(
+            liste_alt_bar,
+            text="▼",
+            command=lambda: self._dosya_sirala(1),
+            width=36,
+            height=34,
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#334155",
+            corner_radius=8
+        ).pack(side="left", padx=2)
+
+        ctk.CTkButton(
+            liste_alt_bar,
+            text="Kaldır",
+            command=self.secileni_sil,
+            width=65,
+            height=34,
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#334155",
+            corner_radius=8
+        ).pack(side="left", padx=4)
+
+        ctk.CTkButton(
+            liste_alt_bar,
+            text="Temizle",
+            command=self.listeyi_temizle,
+            width=65,
+            height=34,
+            fg_color="#FEE2E2",
+            hover_color="#FECACA",
+            text_color="#991B1B",
+            corner_radius=8
+        ).pack(side="right")
+
+        # SAĞ KART: Yüksek Kontrastlı, Dinamik Renk Senkronizasyonlu Sekme Alanı
+        sag_kart = ctk.CTkFrame(govde, fg_color="#FFFFFF", width=470, corner_radius=12, border_width=1, border_color="#E2E8F0")
+        sag_kart.pack(side="right", fill="both")
+        sag_kart.pack_propagate(False)
+
+        self.tabview = ctk.CTkTabview(
+            sag_kart,
+            fg_color="transparent",
+            segmented_button_fg_color="#E2E8F0",
+            segmented_button_selected_color="#1E293B",
+            segmented_button_selected_hover_color="#0F172A",
+            segmented_button_unselected_color="#F8FAFC",
+            segmented_button_unselected_hover_color="#E2E8F0",
+            corner_radius=8
+        )
+        self.tabview.pack(fill="both", expand=True, padx=14, pady=10)
+
+        # Seçili sekme metnini BEYAZ, seçili olmayanları KOYU yapan senkronizasyon fonksiyonu
+        def _sekme_renklerini_guncelle(secilen_sekme):
+            try:
+                for ad, btn in self.tabview._segmented_button._buttons_dict.items():
+                    if ad == secilen_sekme:
+                        btn.configure(text_color="#FFFFFF")
+                    else:
+                        btn.configure(text_color="#334155")
+            except Exception:
+                pass
+
+        self._sekme_renklerini_guncelle = _sekme_renklerini_guncelle
+
+        try:
+            self.tabview._segmented_button.configure(
+                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                height=38,
+                command=lambda val: (self._sekme_renklerini_guncelle(val), self.tabview.set(val))
+            )
+        except Exception:
+            pass
+
+        self.tab_birlestir = self.tabview.add("Birleştir")
+        self.tab_duzenle = self.tabview.add("Sayfalar")
+        self.tab_donusturucu = self.tabview.add("Dönüştür")
+        self.tab_guvenlik = self.tabview.add("KVKK & Kaşe")
+
+        self._sekme_birlestir_olustur()
+        self._sekme_duzenle_olustur()
+        self._sekme_donusturucu_olustur()
+        self._sekme_guvenlik_olustur()
+
+        # İlk açılışta seçili olan sekmenin metin rengini beyaz yap
+        self._sekme_renklerini_guncelle(self.tabview.get())
+
+    # ========================================================
+    # SEKME 1: BİRLEŞTİR
+    # ========================================================
+    def _sekme_birlestir_olustur(self):
+        tab = self.tab_birlestir
+
+        ctk.CTkLabel(tab, text="SIKIŞTIRMA MODU", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(4, 4))
+        self.mod_secimi = ctk.StringVar(value="akilli_vektor")
+
+        ctk.CTkRadioButton(
+            tab,
+            text="Akıllı Mod (Metinleri Koru, Görselleri Sıkıştır)",
+            variable=self.mod_secimi,
+            value="akilli_vektor",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#334155"
+        ).pack(anchor="w", pady=3)
+
+        ctk.CTkRadioButton(
+            tab,
+            text="Agresif Raster (150 DPI Taranmış Evrak Küçültme)",
+            variable=self.mod_secimi,
+            value="maksimum_raster",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#334155"
+        ).pack(anchor="w", pady=3)
+
+        ctk.CTkLabel(tab, text="BATES NUMARALANDIRMA", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(14, 4))
+        bates_frame = ctk.CTkFrame(tab, fg_color="#F8FAFC", corner_radius=8, border_width=1, border_color="#E2E8F0")
+        bates_frame.pack(fill="x", pady=2)
+
+        self.bates_aktif = ctk.BooleanVar(value=False)
+        self.bates_switch = ctk.CTkSwitch(
+            bates_frame,
+            text="Sayfa Altına Numara Bas",
+            variable=self.bates_aktif,
+            command=self._bates_toggle,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#334155"
+        )
+        self.bates_switch.pack(side="left", padx=12, pady=10)
+
+        self.bates_on_ek = ctk.CTkEntry(bates_frame, width=90, height=28, placeholder_text="EK-1", state="disabled")
+        self.bates_on_ek.insert(0, "EK-1")
+        self.bates_on_ek.pack(side="right", padx=12)
+
+        ctk.CTkLabel(tab, text="EYLEMLER", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(16, 6))
+
+        ctk.CTkButton(
+            tab,
+            text="📑 Listedeki Belgeleri Birleştir (PDF Yap)",
+            command=lambda: self._thread_calistir(self.tumunu_birlestir_pdf_yap),
+            fg_color="#0F172A",
+            hover_color="#1E293B",
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            height=40,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+        ctk.CTkButton(
+            tab,
+            text="🗜 Seçili PDF'i Sıkıştır & Küçült",
+            command=lambda: self._thread_calistir(self.pdf_tekil_sikistir),
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#1E293B",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+        ctk.CTkButton(
+            tab,
+            text="⚖ UYAP Akıllı MB Bölücüsü (Hızlı Parçala)",
+            command=lambda: self._thread_calistir(self.pdf_akilli_boyut_bol),
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#1E293B",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+    # ========================================================
+    # SEKME 2: SAYFALAR
+    # ========================================================
+    def _sekme_duzenle_olustur(self):
+        tab = self.tab_duzenle
+
+        ctk.CTkLabel(tab, text="SAYFA AYIRMA VE DÖNDÜRME", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(4, 6))
+
+        ctk.CTkButton(
+            tab,
+            text="🔄 Sayfa Döndür (90° / 180°)",
+            command=self.pdf_dondur_penceresi,
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#1E293B",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+        ctk.CTkButton(
+            tab,
+            text="🧹 Boş Sayfaları Temizle (Akıllı Filtre)",
+            command=lambda: self._thread_calistir(self.pdf_bos_sayfalari_temizle),
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#1E293B",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+        ctk.CTkButton(
+            tab,
+            text="✂ Sayfa Sayfa Böl (Her Sayfayı Tek Dosya Yap)",
+            command=lambda: self._thread_calistir(self.pdf_sayfa_sayfa_bol),
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#1E293B",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+        ctk.CTkButton(
+            tab,
+            text="🎯 Belirli Sayfa Aralığını Ayır",
+            command=self.pdf_aralik_bol,
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#1E293B",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+    # ========================================================
+    # SEKME 3: DÖNÜŞTÜR
+    # ========================================================
+    def _sekme_donusturucu_olustur(self):
+        tab = self.tab_donusturucu
+
+        ctk.CTkLabel(tab, text="FORMAT DÖNÜŞÜMLERİ", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(4, 6))
+
+        bilgi_kutusu = ctk.CTkFrame(tab, fg_color="#F8FAFC", corner_radius=8, border_width=1, border_color="#E2E8F0")
+        bilgi_kutusu.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(
+            bilgi_kutusu,
+            text="💡 Dönüştürmek istediğiniz dosyayı sol listeden seçin\nveya doğrudan ilgili butona basıp dosya seçin.",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#64748B",
+            justify="left"
+        ).pack(anchor="w", padx=12, pady=8)
+
+        ctk.CTkButton(
+            tab,
+            text="📄 UDF ➔ Word (.docx)",
+            command=lambda: self._thread_calistir(self.udf_to_word),
+            fg_color="#0F172A",
+            hover_color="#1E293B",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=38,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+        ctk.CTkButton(
+            tab,
+            text="📑 Word (.docx) ➔ PDF",
+            command=lambda: self._thread_calistir(self.word_to_pdf),
+            fg_color="#0F172A",
+            hover_color="#1E293B",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=38,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+        ctk.CTkButton(
+            tab,
+            text="🔍 Evraktaki Metinleri Görüntüle / Kopyala",
+            command=self.metin_oku_penceresi,
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#1E293B",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+    # ========================================================
+    # SEKME 4: KVKK & KAŞE
+    # ========================================================
+    def _sekme_guvenlik_olustur(self):
+        tab = self.tab_guvenlik
+
+        ctk.CTkLabel(tab, text="HUKUKİ İŞLEMLER VE GÜVENLİK", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(4, 6))
+
+        ctk.CTkButton(
+            tab,
+            text="🛡 'Aslı Gibidir' Dijital Kaşesi Bas",
+            command=self.pdf_kase_ekle_penceresi,
+            fg_color="#0F172A",
+            hover_color="#1E293B",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=38,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+        ctk.CTkButton(
+            tab,
+            text="🕶 KVKK Akıllı Karartma (T.C., IBAN, Tel)",
+            command=self.akilli_karartma_penceresi,
+            fg_color="#F1F5F9",
+            hover_color="#E2E8F0",
+            text_color="#1E293B",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+    def _bates_toggle(self):
         if self.bates_aktif.get():
-            self.bates_on_ek.config(state="normal")
+            self.bates_on_ek.configure(state="normal")
         else:
-            self.bates_on_ek.config(state="disabled")
+            self.bates_on_ek.configure(state="disabled")
+
+    # ========================================================
+    # LİSTE VE DOSYA YÖNETİMİ
+    # ========================================================
+    def _liste_arayuzunu_yenile(self):
+        for widget in self.liste_frame.winfo_children():
+            widget.destroy()
+
+        if not self.dosyalar:
+            self.bos_bilgi_etiketi = ctk.CTkLabel(
+                self.liste_frame,
+                text="Belgeleri buraya sürükleyin\nveya aşağıdaki butondan ekleyin\n(PDF, Word, Görsel, UDF)",
+                font=ctk.CTkFont(family="Segoe UI", size=12),
+                text_color="#94A3B8"
+            )
+            self.bos_bilgi_etiketi.pack(pady=120)
+            self.dosya_sayisi_badge.configure(text="0 dosya")
+            self.secili_dosya_indeksi = None
+            return
+
+        self.secili_dosya_indeksi = getattr(self, "secili_dosya_indeksi", None)
+        if self.secili_dosya_indeksi is not None and self.secili_dosya_indeksi >= len(self.dosyalar):
+            self.secili_dosya_indeksi = len(self.dosyalar) - 1
+
+        self.dosya_satir_widgetleri = []
+        for i, yol in enumerate(self.dosyalar):
+            uzanti = os.path.splitext(yol)[1].lower()
+            boyut_mb = os.path.getsize(yol) / (1024 * 1024)
+            simge_haritasi = {'.pdf': '📄', '.udf': '⚖', '.docx': '📝'}
+            simge = simge_haritasi.get(uzanti, '🖼')
+            ad = os.path.basename(yol)
+
+            is_selected = (self.secili_dosya_indeksi == i)
+            arkaplan = "#E2E8F0" if is_selected else "#FFFFFF"
+
+            satir = ctk.CTkFrame(self.liste_frame, fg_color=arkaplan, corner_radius=8, height=36)
+            satir.pack(fill="x", pady=2)
+            satir.pack_propagate(False)
+
+            def secim_yap(idx=i):
+                self.secili_dosya_indeksi = idx
+                self._liste_arayuzunu_yenile()
+
+            satir.bind("<Button-1>", lambda e, idx=i: secim_yap(idx))
+
+            lbl_ad = ctk.CTkLabel(
+                satir,
+                text=f"{simge}  {ad}",
+                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold" if is_selected else "normal"),
+                text_color="#0F172A"
+            )
+            lbl_ad.pack(side="left", padx=10)
+            lbl_ad.bind("<Button-1>", lambda e, idx=i: secim_yap(idx))
+
+            lbl_boyut = ctk.CTkLabel(
+                satir,
+                text=f"{boyut_mb:.2f} MB",
+                font=ctk.CTkFont(family="Segoe UI", size=11),
+                text_color="#64748B"
+            )
+            lbl_boyut.pack(side="right", padx=10)
+            lbl_boyut.bind("<Button-1>", lambda e, idx=i: secim_yap(idx))
+
+            self.dosya_satir_widgetleri.append(satir)
+
+        self.dosya_sayisi_badge.configure(text=f"{len(self.dosyalar)} dosya")
 
     def dosya_ekle_listeye(self, dosya_yolu):
-        dosya_yolu = dosya_yolu.strip('{}')
+        dosya_yolu = dosya_yolu.strip('{}').strip('"')
+        if not os.path.exists(dosya_yolu):
+            return
+        if os.path.isdir(dosya_yolu):
+            for root, _, files in os.walk(dosya_yolu):
+                for f in sorted(files):
+                    self.dosya_ekle_listeye(os.path.join(root, f))
+            return
+
         uzanti = os.path.splitext(dosya_yolu)[1].lower()
         if uzanti in DESTEKLENEN_UZANTILAR and dosya_yolu not in self.dosyalar:
             self.dosyalar.append(dosya_yolu)
-            boyut_mb = os.path.getsize(dosya_yolu) / (1024 * 1024)
-            simgeler = {'.pdf': '📄', '.udf': '⚖'}
-            tur_simge = simgeler.get(uzanti, '🖼')
-            dosya_adi = os.path.basename(dosya_yolu)
-            self.dosya_listebox.insert(tk.END, f"{tur_simge} {dosya_adi} ({boyut_mb:.2f} MB)")
+            self._liste_arayuzunu_yenile()
 
     def dosyalari_surukle_birak(self, event):
-        dosya_yollari = self.root.tk.splitlist(event.data)
-        for dosya in dosya_yollari:
-            self.dosya_ekle_listeye(dosya)
-        self.durum_etiketi.config(text=f"Toplam {len(self.dosyalar)} dosya eklendi.")
+        yollar = self.tk.splitlist(event.data)
+        for y in yollar:
+            self.dosya_ekle_listeye(y)
+        self.durum_etiketi.configure(text=f"Toplam {len(self.dosyalar)} dosya hazır.")
 
     def dosya_ekle_dialog(self):
         secilenler = filedialog.askopenfilenames(
             title="Dosyaları Seçin",
             filetypes=[
-                ("Tüm Desteklenen Dosyalar", "*.pdf *.udf *.jpg *.jpeg *.png *.webp *.bmp"),
-                ("UDF Dosyaları", "*.udf"),
+                ("Tüm Desteklenen Evraklar", "*.pdf *.docx *.udf *.jpg *.jpeg *.png *.webp *.bmp"),
                 ("PDF Dosyaları", "*.pdf"),
+                ("Word Belgeleri", "*.docx"),
+                ("UDF Dosyaları", "*.udf"),
                 ("Görsel Dosyaları", "*.jpg *.jpeg *.png *.webp *.bmp")
             ]
         )
-        for dosya in secilenler:
-            self.dosya_ekle_listeye(dosya)
-        self.durum_etiketi.config(text=f"Toplam {len(self.dosyalar)} dosya eklendi.")
+        for d in secilenler:
+            self.dosya_ekle_listeye(d)
+        self.durum_etiketi.configure(text=f"Toplam {len(self.dosyalar)} dosya hazır.")
 
     def secileni_sil(self):
-        secili = self.dosya_listebox.curselection()
-        if secili:
-            indeks = secili[0]
-            del self.dosyalar[indeks]
-            self.dosya_listebox.delete(indeks)
-            self.durum_etiketi.config(text="Seçilen dosya kaldırıldı.")
+        if hasattr(self, "secili_dosya_indeksi") and self.secili_dosya_indeksi is not None:
+            if 0 <= self.secili_dosya_indeksi < len(self.dosyalar):
+                del self.dosyalar[self.secili_dosya_indeksi]
+                self.secili_dosya_indeksi = None
+                self._liste_arayuzunu_yenile()
+                self.durum_etiketi.configure(text="Seçilen belge kaldırıldı.")
 
     def listeyi_temizle(self):
         self.dosyalar.clear()
-        self.dosya_listebox.delete(0, tk.END)
-        self.durum_etiketi.config(text="Liste temizlendi.")
+        self.secili_dosya_indeksi = None
+        self._liste_arayuzunu_yenile()
+        self.durum_etiketi.configure(text="Liste temizlendi.")
+
+    def _dosya_sirala(self, yon):
+        if not hasattr(self, "secili_dosya_indeksi") or self.secili_dosya_indeksi is None:
+            return
+        eski = self.secili_dosya_indeksi
+        yeni = eski + yon
+        if 0 <= yeni < len(self.dosyalar):
+            self.dosyalar[eski], self.dosyalar[yeni] = self.dosyalar[yeni], self.dosyalar[eski]
+            self.secili_dosya_indeksi = yeni
+            self._liste_arayuzunu_yenile()
 
     def _secili_dosya_al(self):
-        secili = self.dosya_listebox.curselection()
-        if not secili:
-            messagebox.showwarning("Seçim Yapılmadı", "Lütfen sol listeden bir dosya seçin.")
+        if not hasattr(self, "secili_dosya_indeksi") or self.secili_dosya_indeksi is None:
+            if self.dosyalar:
+                self.secili_dosya_indeksi = 0
+                self._liste_arayuzunu_yenile()
+                return self.dosyalar[0]
+            messagebox.showwarning("Seçim Yapılmadı", "Lütfen sol taraftaki listeden bir evrak seçin.")
             return None
-        return self.dosyalar[secili[0]]
+        return self.dosyalar[self.secili_dosya_indeksi]
 
-    # ========================================================
-    # 1. SAYFA DÖNDÜRME & YÖN DÜZELTME MODÜLÜ
-    # ========================================================
-    def pdf_dondur_penceresi(self):
-        kaynak_yol = self._secili_dosya_al()
-        if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
-            messagebox.showwarning("Geçersiz Dosya", "Sayfa Döndürme yalnızca PDF dosyaları içindir.")
-            return
-
-        doc = pymupdf.open(kaynak_yol)
-        toplam_sayfa = len(doc)
-
-        pencere = tk.Toplevel(self.root)
-        pencere.title("Sayfa Döndür & Yön Düzelt")
-        pencere.geometry("400x260")
-        pencere.resizable(False, False)
-        pencere.configure(bg="#F4F6F9")
-
-        tk.Label(
-            pencere,
-            text="🔄 Sayfa Döndürme Modülü",
-            font=("Segoe UI", 11, "bold"),
-            bg="#1B263B",
-            fg="white",
-            pady=6
-        ).pack(fill="x")
-
-        icerik = tk.Frame(pencere, bg="#F4F6F9", padx=14, pady=8)
-        icerik.pack(fill="both", expand=True)
-
-        tk.Label(icerik, text=f"Toplam Sayfa: {toplam_sayfa}", font=("Segoe UI", 9, "bold"), bg="#F4F6F9").pack(anchor="w")
-
-        derece_var = tk.IntVar(value=90)
-        yon_cerceve = tk.Frame(icerik, bg="#F4F6F9")
-        yon_cerceve.pack(fill="x", pady=4)
-        tk.Radiobutton(yon_cerceve, text="90° Sağa", variable=derece_var, value=90, bg="#F4F6F9").pack(side="left")
-        tk.Radiobutton(yon_cerceve, text="90° Sola", variable=derece_var, value=270, bg="#F4F6F9").pack(side="left", padx=10)
-        tk.Radiobutton(yon_cerceve, text="180° Baş Aşağı", variable=derece_var, value=180, bg="#F4F6F9").pack(side="left")
-
-        tk.Label(icerik, text="Döndürülecek Sayfalar (Boş bırakırsanız hepsi döner):", font=("Segoe UI", 8), bg="#F4F6F9").pack(anchor="w", pady=(6, 2))
-        aralik_entry = tk.Entry(icerik, font=("Segoe UI", 9))
-        aralik_entry.pack(fill="x")
-        tk.Label(icerik, text="Örn: 1-3, 5 (veya tümü için boş bırakın)", font=("Segoe UI", 7, "italic"), fg="#6C757D", bg="#F4F6F9").pack(anchor="w")
-
-        def dondur_kaydet():
-            aralik_metni = aralik_entry.get().strip()
-            secilen_indeksler = set()
-            if aralik_metni:
-                try:
-                    for parca in aralik_metni.split(','):
-                        parca = parca.strip()
-                        if '-' in parca:
-                            b, s = map(int, parca.split('-'))
-                            for i in range(b, s + 1):
-                                if 1 <= i <= toplam_sayfa:
-                                    secilen_indeksler.add(i - 1)
-                        else:
-                            i = int(parca)
-                            if 1 <= i <= toplam_sayfa:
-                                secilen_indeksler.add(i - 1)
-                except Exception:
-                    messagebox.showerror("Hata", "Geçersiz sayfa formatı! Örn: 1-3, 5")
-                    return
-            else:
-                secilen_indeksler = set(range(toplam_sayfa))
-
-            hedef_yol = filedialog.asksaveasfilename(
-                defaultextension=".pdf",
-                filetypes=[("PDF Dosyası", "*.pdf")],
-                title="Döndürülmüş PDF'i Kaydet",
-                initialfile="dondurulmus_" + os.path.basename(kaynak_yol)
-            )
-            if not hedef_yol:
-                return
-
-            try:
-                derece = derece_var.get()
-                for idx in secilen_indeksler:
-                    sayfa = doc[idx]
-                    sayfa.set_rotation((sayfa.rotation + derece) % 360)
-
-                doc.save(hedef_yol, garbage=4, deflate=True)
-                doc.close()
-                pencere.destroy()
-                self.durum_etiketi.config(text=f"{len(secilen_indeksler)} sayfa döndürüldü.")
-                messagebox.showinfo("Başarılı", f"{len(secilen_indeksler)} sayfa başarıyla döndürüldü ve kaydedildi!")
-            except Exception as e:
-                messagebox.showerror("Hata", f"Döndürme hatası:\n{str(e)}")
-
-        tk.Button(
-            icerik,
-            text="🔄 Döndür ve Kaydet",
-            command=dondur_kaydet,
-            bg="#0582CA",
-            fg="white",
-            font=("Segoe UI", 9, "bold"),
-            relief="flat",
-            pady=5
-        ).pack(fill="x", pady=(10, 0))
-
-    # ========================================================
-    # 2. GELİŞMİŞ 'ASLI GİBİDİR' KAŞESİ
-    # ========================================================
-    def pdf_kase_ekle_penceresi(self):
-        kaynak_yol = self._secili_dosya_al()
-        if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
-            messagebox.showwarning("Geçersiz Dosya", "Kaşe Ekleme yalnızca PDF dosyaları içindir.")
-            return
-
-        doc = pymupdf.open(kaynak_yol)
-        toplam_sayfa = len(doc)
-        doc.close()
-
-        bugun = datetime.datetime.now().strftime("%d.%m.%Y")
-
-        pencere = tk.Toplevel(self.root)
-        pencere.title("Otomatik 'Aslı Gibidir' Kaşesi")
-        pencere.geometry("450x450")
-        pencere.resizable(False, False)
-        pencere.configure(bg="#F4F6F9")
-
-        tk.Label(
-            pencere,
-            text="🛡 Dijital Aslı Gibidir / Suret Kaşesi",
-            font=("Segoe UI", 11, "bold"),
-            bg="#1B263B",
-            fg="white",
-            pady=6
-        ).pack(fill="x")
-
-        icerik = tk.Frame(pencere, bg="#F4F6F9", padx=14, pady=6)
-        icerik.pack(fill="both", expand=True)
-
-        tk.Label(icerik, text="Kaşe Metni Başlığı:", font=("Segoe UI", 8, "bold"), bg="#F4F6F9").pack(anchor="w")
-        baslik_entry = tk.Entry(icerik, font=("Segoe UI", 9))
-        baslik_entry.insert(0, "ASLI GİBİDİR")
-        baslik_entry.pack(fill="x", pady=(0, 2))
-
-        tk.Label(icerik, text="Avukat İsim / Unvan:", font=("Segoe UI", 8, "bold"), bg="#F4F6F9").pack(anchor="w")
-        avukat_entry = tk.Entry(icerik, font=("Segoe UI", 9))
-        avukat_entry.insert(0, "Av. Tolunay AKAY")
-        avukat_entry.pack(fill="x", pady=(0, 2))
-
-        tk.Label(icerik, text="Tarih / Ek Bilgi:", font=("Segoe UI", 8, "bold"), bg="#F4F6F9").pack(anchor="w")
-        ek_entry = tk.Entry(icerik, font=("Segoe UI", 9))
-        ek_entry.insert(0, f"Tarih: {bugun}")
-        ek_entry.pack(fill="x", pady=(0, 2))
-
-        # Renk Seçimi
-        renk_var = tk.StringVar(value="kirmizi")
-        renk_cerceve = tk.Frame(icerik, bg="#F4F6F9")
-        renk_cerceve.pack(fill="x", pady=2)
-        tk.Label(renk_cerceve, text="Renk:", font=("Segoe UI", 8, "bold"), bg="#F4F6F9").pack(side="left")
-        tk.Radiobutton(renk_cerceve, text="Kırmızı", variable=renk_var, value="kirmizi", bg="#F4F6F9", fg="#C1121F", font=("Segoe UI", 8, "bold")).pack(side="left", padx=5)
-        tk.Radiobutton(renk_cerceve, text="Lacivert", variable=renk_var, value="lacivert", bg="#F4F6F9", fg="#003049", font=("Segoe UI", 8, "bold")).pack(side="left", padx=5)
-
-        # Kaşe Konumu Seçimi
-        konum_var = tk.StringVar(value="sag_alt")
-        konum_cerceve = tk.LabelFrame(icerik, text=" Kaşe Konumu ", font=("Segoe UI", 8, "bold"), bg="#F4F6F9", fg="#1B263B", padx=6, pady=2)
-        konum_cerceve.pack(fill="x", pady=3)
-
-        konum_ust = tk.Frame(konum_cerceve, bg="#F4F6F9")
-        konum_ust.pack(fill="x")
-        tk.Radiobutton(konum_ust, text="↘ Sağ Alt", variable=konum_var, value="sag_alt", bg="#F4F6F9", font=("Segoe UI", 8)).pack(side="left", expand=True)
-        tk.Radiobutton(konum_ust, text="↙ Sol Alt", variable=konum_var, value="sol_alt", bg="#F4F6F9", font=("Segoe UI", 8)).pack(side="left", expand=True)
-
-        konum_alt = tk.Frame(konum_cerceve, bg="#F4F6F9")
-        konum_alt.pack(fill="x")
-        tk.Radiobutton(konum_alt, text="⬇ Alt Orta", variable=konum_var, value="alt_orta", bg="#F4F6F9", font=("Segoe UI", 8)).pack(side="left", expand=True)
-        tk.Radiobutton(konum_alt, text="↗ Sağ Üst", variable=konum_var, value="sag_ust", bg="#F4F6F9", font=("Segoe UI", 8)).pack(side="left", expand=True)
-
-        # Sayfa Kapsamı Seçimi
-        sayfa_kapsam_var = tk.StringVar(value="hepsi")
-        kapsam_cerceve = tk.LabelFrame(icerik, text=" Sayfa Kapsamı ", font=("Segoe UI", 8, "bold"), bg="#F4F6F9", fg="#1B263B", padx=6, pady=2)
-        kapsam_cerceve.pack(fill="x", pady=3)
-
-        tk.Radiobutton(kapsam_cerceve, text="Tüm Sayfalara Bas", variable=sayfa_kapsam_var, value="hepsi", bg="#F4F6F9", font=("Segoe UI", 8)).pack(anchor="w")
-        
-        aralik_secim_satir = tk.Frame(kapsam_cerceve, bg="#F4F6F9")
-        aralik_secim_satir.pack(fill="x")
-        tk.Radiobutton(aralik_secim_satir, text="Yalnızca Belirtilen Sayfalara:", variable=sayfa_kapsam_var, value="aralik", bg="#F4F6F9", font=("Segoe UI", 8)).pack(side="left")
-        kase_sayfa_entry = tk.Entry(aralik_secim_satir, font=("Segoe UI", 8), width=14)
-        kase_sayfa_entry.insert(0, "1")
-        kase_sayfa_entry.pack(side="left", padx=4)
-        tk.Label(aralik_secim_satir, text="(Örn: 1-3, 5)", font=("Segoe UI", 7, "italic"), fg="#6C757D", bg="#F4F6F9").pack(side="left")
-
-        def kaseyi_bas():
-            hedef_yol = filedialog.asksaveasfilename(
-                defaultextension=".pdf",
-                filetypes=[("PDF Dosyası", "*.pdf")],
-                title="Kaşeli PDF'i Kaydet",
-                initialfile="kaseli_" + os.path.basename(kaynak_yol)
-            )
-            if not hedef_yol:
-                return
-
-            try:
-                doc = pymupdf.open(kaynak_yol)
-                toplam_s = len(doc)
-                renk_kodu = (0.75, 0.05, 0.05) if renk_var.get() == "kirmizi" else (0.0, 0.18, 0.38)
-
-                b_metin = baslik_entry.get().strip()
-                a_metin = avukat_entry.get().strip()
-                e_metin = ek_entry.get().strip()
-                tam_kase_metni = f"{b_metin}\n{a_metin}\n{e_metin}"
-
-                hedef_indeksler = set()
-                if sayfa_kapsam_var.get() == "hepsi":
-                    hedef_indeksler = set(range(toplam_s))
-                else:
-                    girdi = kase_sayfa_entry.get().strip()
-                    try:
-                        for parca in girdi.split(','):
-                            parca = parca.strip()
-                            if '-' in parca:
-                                b, son = map(int, parca.split('-'))
-                                for s in range(b, son + 1):
-                                    if 1 <= s <= toplam_s:
-                                        hedef_indeksler.add(s - 1)
-                            else:
-                                s = int(parca)
-                                if 1 <= s <= toplam_s:
-                                    hedef_indeksler.add(s - 1)
-                    except Exception:
-                        doc.close()
-                        messagebox.showerror("Hata", "Geçersiz sayfa formatı girdiniz! (Örn: 1-3, 5)")
-                        return
-
-                if not hedef_indeksler:
-                    doc.close()
-                    messagebox.showwarning("Uyarı", "Kaşe basılacak geçerli hiçbir sayfa seçilmedi.")
-                    return
-
-                font_param = {"fontfile": TURKCE_FONT_YOLU, "fontname": "arial_tr"} if TURKCE_FONT_YOLU else {"fontname": "helv"}
-
-                secili_konum = konum_var.get()
-                kutu_w, kutu_h = 165, 52
-                kenar_payi = 25
-
-                tahmini_metin_yuksekligi = 35.0
-                dikey_bosluk = max(0.0, (kutu_h - tahmini_metin_yuksekligi) / 2.0)
-
-                for idx in hedef_indeksler:
-                    sayfa = doc[idx]
-                    w = sayfa.rect.width
-                    h = sayfa.rect.height
-
-                    if secili_konum == "sag_alt":
-                        cerceve_rect = pymupdf.Rect(w - kutu_w - kenar_payi, h - kutu_h - kenar_payi, w - kenar_payi, h - kenar_payi)
-                    elif secili_konum == "sol_alt":
-                        cerceve_rect = pymupdf.Rect(kenar_payi, h - kutu_h - kenar_payi, kenar_payi + kutu_w, h - kenar_payi)
-                    elif secili_konum == "alt_orta":
-                        orta_x = (w - kutu_w) / 2
-                        cerceve_rect = pymupdf.Rect(orta_x, h - kutu_h - kenar_payi, orta_x + kutu_w, h - kenar_payi)
-                    elif secili_konum == "sag_ust":
-                        cerceve_rect = pymupdf.Rect(w - kutu_w - kenar_payi, kenar_payi, w - kenar_payi, kenar_payi + kutu_h)
-                    else:
-                        cerceve_rect = pymupdf.Rect(w - kutu_w - kenar_payi, h - kutu_h - kenar_payi, w - kenar_payi, h - kenar_payi)
-
-                    sayfa.draw_rect(cerceve_rect, color=renk_kodu, width=1.5)
-
-                    metin_rect = pymupdf.Rect(
-                        cerceve_rect.x0 + 4,
-                        cerceve_rect.y0 + dikey_bosluk,
-                        cerceve_rect.x1 - 4,
-                        cerceve_rect.y1
-                    )
-
-                    sayfa.insert_textbox(
-                        metin_rect,
-                        tam_kase_metni,
-                        fontsize=9,
-                        color=renk_kodu,
-                        align=pymupdf.TEXT_ALIGN_CENTER,
-                        **font_param
-                    )
-
-                doc.save(hedef_yol, garbage=4, deflate=True)
-                doc.close()
-                pencere.destroy()
-                self.durum_etiketi.config(text=f"Kaşe seçilen {len(hedef_indeksler)} sayfaya başarıyla basıldı.")
-                messagebox.showinfo("Başarılı", f"Kaşe seçilen {len(hedef_indeksler)} sayfaya başarıyla basıldı!\n\nDosya: {os.path.basename(hedef_yol)}")
-            except Exception as e:
-                messagebox.showerror("Hata", f"Kaşe basılırken hata oluştu:\n{str(e)}")
-
-        tk.Button(
-            icerik,
-            text="🛡 Kaşeyi Bas ve Kaydet",
-            command=kaseyi_bas,
-            bg="#C1121F",
-            fg="white",
-            font=("Segoe UI", 9, "bold"),
-            relief="flat",
-            pady=5
-        ).pack(fill="x", pady=(6, 0))
-
-    # ========================================================
-    # 3. BOŞ SAYFALARI OTOMATİK TEMİZLEME MODÜLÜ
-    # ========================================================
-    def pdf_bos_sayfalari_temizle(self):
-        kaynak_yol = self._secili_dosya_al()
-        if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
-            messagebox.showwarning("Geçersiz Dosya", "Boş sayfa temizleme yalnızca PDF dosyaları içindir.")
-            return
-
-        hedef_yol = filedialog.asksaveasfilename(
-            defaultextension=".pdf",
-            filetypes=[("PDF Dosyası", "*.pdf")],
-            title="Temizlenmiş PDF'i Kaydet",
-            initialfile="temiz_" + os.path.basename(kaynak_yol)
-        )
+    def _ayni_dosya_kontrolu(self, kaynak_yol, hedef_yol):
         if not hedef_yol:
-            return
+            return False
+        if os.path.abspath(kaynak_yol) == os.path.abspath(hedef_yol):
+            messagebox.showerror("Hata", "Hedef dosya ile kaynak dosya aynı olamaz! Lütfen farklı bir isimle kaydedin.")
+            return False
+        return True
 
-        try:
-            self.durum_etiketi.config(text="Sayfalar piksel ve metin analizinden geçiriliyor...")
-            self.root.update()
-
-            doc = pymupdf.open(kaynak_yol)
-            yeni_doc = pymupdf.open()
-            silinen_sayfa_sayisi = 0
-
-            for i, sayfa in enumerate(doc):
-                metin = sayfa.get_text().strip()
-                if metin:
-                    yeni_doc.insert_pdf(doc, from_page=i, to_page=i)
-                    continue
-
-                pix = sayfa.get_pixmap(dpi=50)
-                samples = pix.samples
-                toplam_piksel = pix.width * pix.height
-                beyaz_olmayan = 0
-                step = pix.n
-
-                for p in range(0, len(samples), step):
-                    val = samples[p]
-                    if val < 240:
-                        beyaz_olmayan += 1
-
-                oran = beyaz_olmayan / toplam_piksel
-                if oran > 0.002:
-                    yeni_doc.insert_pdf(doc, from_page=i, to_page=i)
-                else:
-                    silinen_sayfa_sayisi += 1
-
-            if len(yeni_doc) == 0:
-                yeni_doc.insert_pdf(doc, from_page=0, to_page=0)
-                silinen_sayfa_sayisi -= 1
-
-            yeni_doc.save(hedef_yol, garbage=4, deflate=True)
-            yeni_doc.close()
-            doc.close()
-
-            self.durum_etiketi.config(text=f"Temizlik tamamlandı: {silinen_sayfa_sayisi} boş sayfa silindi.")
-            messagebox.showinfo(
-                "Temizlik Başarılı",
-                f"Toplam {silinen_sayfa_sayisi} adet boş/beyaz sayfa tespit edilip silindi!\n\nDosya: {os.path.basename(hedef_yol)}"
-            )
-        except Exception as e:
-            messagebox.showerror("Hata", f"Boş sayfalar temizlenirken hata oluştu:\n{str(e)}")
-
-    # ========================================================
-    # 4. AKILLI UYAP BOYUT BÖLÜCÜSÜ (CHUNK SPLITTER)
-    # ========================================================
-    def pdf_akilli_boyut_bol(self):
-        kaynak_yol = self._secili_dosya_al()
-        if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
-            messagebox.showwarning("Geçersiz Dosya", "Akıllı Boyut Bölücüsü yalnızca PDF dosyaları içindir.")
-            return
-
-        dosya_mb = os.path.getsize(kaynak_yol) / (1024 * 1024)
-        
-        limit_str = simpledialog.askstring(
-            "Hedef Boyut Limiti (MB)",
-            f"Seçili Dosya Boyutu: {dosya_mb:.2f} MB\n\nHer bir parçanın maksimum boyutunu (MB) girin:\n(UYAP ek yükleme limiti için 9.5 MB önerilir)",
-            initialvalue="9.5",
-            parent=self.root
-        )
-        if not limit_str:
-            return
-
-        try:
-            hedef_limit_mb = float(limit_str.replace(',', '.'))
-            if hedef_limit_mb <= 0:
-                raise ValueError()
-        except Exception:
-            messagebox.showerror("Hata", "Lütfen geçerli bir megabayt (MB) değeri girin! (Örn: 9.5)")
-            return
-
-        hedef_limit_bytes = hedef_limit_mb * 1024 * 1024
-
-        hedef_klasor = filedialog.askdirectory(title="Parçaların Kaydedileceği Klasörü Seçin")
-        if not hedef_klasor:
-            return
-
-        try:
-            self.durum_etiketi.config(text="Akıllı boyut analizi ve bölme işlemi yapılıyor...")
-            self.root.update()
-
-            ana_doc = pymupdf.open(kaynak_yol)
-            toplam_sayfa = len(ana_doc)
-            dosya_kok = os.path.splitext(os.path.basename(kaynak_yol))[0]
-
-            parca_sayisi = 1
-            mevcut_parca_doc = pymupdf.open()
-            mevcut_parca_sayfa_sayisi = 0
-            uretilen_dosyalar = []
-
-            for i in range(toplam_sayfa):
-                mevcut_parca_doc.insert_pdf(ana_doc, from_page=i, to_page=i)
-                mevcut_parca_sayfa_sayisi += 1
-
-                test_bytes = mevcut_parca_doc.tobytes(garbage=4, deflate=True)
-                mevcut_boyut = len(test_bytes)
-
-                if mevcut_boyut > hedef_limit_bytes and mevcut_parca_sayfa_sayisi > 1:
-                    mevcut_parca_doc.delete_page(mevcut_parca_sayfa_sayisi - 1)
-                    cikti_yol = os.path.join(hedef_klasor, f"{dosya_kok}_parca_{parca_sayisi}.pdf")
-                    mevcut_parca_doc.save(cikti_yol, garbage=4, deflate=True)
-                    mevcut_parca_doc.close()
-                    
-                    uretilen_boyut_mb = os.path.getsize(cikti_yol) / (1024 * 1024)
-                    uretilen_dosyalar.append((os.path.basename(cikti_yol), uretilen_boyut_mb))
-
-                    parca_sayisi += 1
-                    mevcut_parca_doc = pymupdf.open()
-                    mevcut_parca_doc.insert_pdf(ana_doc, from_page=i, to_page=i)
-                    mevcut_parca_sayfa_sayisi = 1
-
-            if len(mevcut_parca_doc) > 0:
-                cikti_yol = os.path.join(hedef_klasor, f"{dosya_kok}_parca_{parca_sayisi}.pdf")
-                mevcut_parca_doc.save(cikti_yol, garbage=4, deflate=True)
-                mevcut_parca_doc.close()
-                uretilen_boyut_mb = os.path.getsize(cikti_yol) / (1024 * 1024)
-                uretilen_dosyalar.append((os.path.basename(cikti_yol), uretilen_boyut_mb))
-
-            ana_doc.close()
-
-            ozet_metin = "\n".join([f"• {ad}: {b:.2f} MB" for ad, b in uretilen_dosyalar])
-            self.durum_etiketi.config(text=f"Bölme tamamlandı: {len(uretilen_dosyalar)} parça oluşturuldu.")
-            messagebox.showinfo(
-                "Akıllı Bölme Başarılı",
-                f"Toplam {dosya_mb:.2f} MB'lık evrak {hedef_limit_mb} MB sınırına göre {len(uretilen_dosyalar)} parçaya bölündü!\n\n"
-                f"{ozet_metin}\n\nKlasör: {hedef_klasor}"
-            )
-        except Exception as e:
-            messagebox.showerror("Hata", f"Akıllı bölme sırasında hata oluştu:\n{str(e)}")
-
-    # ========================================================
-    # AYRINTILI KULLANIM REHBERİ
-    # ========================================================
-    def rehber_penceresi_ac(self):
-        pencere = tk.Toplevel(self.root)
-        pencere.title("Kullanım Kılavuzu & Özellik Rehberi")
-        pencere.geometry("680x580")
-        pencere.resizable(False, False)
-        pencere.configure(bg="#F4F6F9")
-
-        tk.Label(
-            pencere,
-            text="📖 UYAP Evrak Asistanı - Detaylı Kullanım Kılavuzu",
-            font=("Segoe UI", 12, "bold"),
-            bg="#1B263B",
-            fg="white",
-            pady=8
-        ).pack(fill="x")
-
-        metin_alani = scrolledtext.ScrolledText(
-            pencere,
-            wrap=tk.WORD,
-            font=("Segoe UI", 9),
-            bg="#FFFFFF",
-            fg="#212529",
-            padx=14,
-            pady=10
-        )
-        metin_alani.pack(fill="both", expand=True, padx=12, pady=8)
-
-        rehber_icerik = """
-UYAP EVRAK ASİSTANI - DETAYLI KULLANIM REHBERİ
-
-Bu yazılım; adliye, icra ve UYAP evrak süreçlerinde karşılaşılan teknik kısıtlamaları (dosya boyutu, sayfa yönü, format uyumsuzlukları, veri gizliliği) en pratik ve güvenli şekilde çözmek amacıyla tasarlanmıştır.
-
-==================================================
-1. DOSYA EKLEME & LİSTE YÖNETİMİ
-==================================================
-• Sürükle-Bırak: PDF, görsel (JPG, PNG, WEBP, BMP) veya UDF dosyalarını doğrudan sol taraftaki listeye sürükleyip bırakabilirsiniz.
-• Dosya Ekle: Pencere açarak bilgisayarınızdan tekli ya da toplu dosya seçebilirsiniz.
-• Seçileni Kaldır / Listeyi Temizle: Yanlış eklenen evrakları listeden çıkarabilir veya tüm listeyi sıfırlayabilirsiniz.
-
-==================================================
-2. BİRLEŞTİRME & SIKIŞTIRMA MODÜLLERİ
-==================================================
-• 📑 PDF'leri Birleştir:
-  - Listedeki tüm evrakları (PDF'ler ve fotoğraflar) sırasıyla tek bir PDF haline getirir.
-  - Görselleri (dekont, senet, tutanak fotoğrafları) sayfayı bozmadan otomatik olarak A4 boyutuna oranlar, kenar boşluklarını ayarlar ve ortalar.
-  - Sıkıştırma seviyesine göre çıktıyı UYAP'a uygun hafif boyutta üretir.
-
-• 🗜 PDF Sıkıştır:
-  - Listeden seçtiğiniz tek bir PDF'in kalitesini okunabilir seviyede tutarak boyutunu küçültür (örn: 15 MB ➔ 2 MB).
-  - 'Dengeli (150 DPI)': Standart evraklar ve dilekçeler için ideal netlik ve boyut tasarrufu sağlar.
-  - 'Maksimum Sıkıştırma (100 DPI)': Çok ağır taranmış dosyaları UYAP limitine sokmak için yüksek oranda sıkıştırır.
-
-• 🏷 Ek Etiketi / Bates Numaralandırma:
-  - 'Sayfa Altına Numara Bas' kutusunu işaretlerseniz, evraklar birleştirilirken veya sıkıştırılırken her sayfanın alt ortasına numara basılır.
-  - Etiket kutusuna 'EK-1', 'DELİL-2' veya dilediğiniz başlığı yazabilirsiniz. Çıktı formatı: 'EK-1 | Sayfa 1/15' şeklinde yerleştirilir.
-
-==================================================
-3. SAYFA BÖLME & PARÇALAMA İŞLEMLERİ
-==================================================
-• ✂ Sayfa Böl:
-  - Seçtiğiniz PDF'in her bir sayfasını tek tek ayırır.
-  - Belirlediğiniz klasörün içine 'dosya_sayfa_1.pdf', 'dosya_sayfa_2.pdf' şeklinde kaydeder.
-
-• 🎯 Aralık Ayır:
-  - Belgeden yalnızca istediğiniz belirli sayfaları çekip yeni bir PDF yapar.
-  - Giriş Formatı: '1, 3, 5' veya '1-4, 7-10'.
-
-• ⚖ Akıllı UYAP Boyut Bölücüsü (MB Sınırına Göre):
-  - Çok hacimli dosyaları hedef MB sınırına göre akıllıca parçalar.
-  - Varsayılan olarak UYAP ek sınırına tam uyan '9.5 MB' önerilir.
-  - Sayfaları sırayla tartarak 'dosya_parca_1.pdf', 'dosya_parca_2.pdf' üretir; hiçbir parça limiti aşmaz.
-
-==================================================
-4. EVRAK DÜZENLEME & İMZA ÖNCESİ HAZIRLIK
-==================================================
-• 🔄 Sayfa Döndür (90°):
-  - Ters veya yan taranmış sayfaların yönünü (90° Sağa/Sola veya 180°) düzeltir.
-  - İster belgenin tamamını döndürün, ister sadece '1-3, 5' gibi belirli sayfaları.
-
-• 🛡 'Aslı Gibidir' Kaşesi:
-  - Belgenin üzerine şık çerçeveli dijital kaşe basar.
-  - Konum: Sağ Alt, Sol Alt, Alt Orta veya Sağ Üst.
-  - Kapsam: 'Tüm Sayfalara' veya 'Yalnızca Belirtilen Sayfalara (Örn: 1)'.
-  - Renk: Kırmızı veya Lacivert resmi mühür rengi.
-  - Türkçe karakterler tam desteklidir.
-
-• 🧹 Boş Sayfaları Temizle:
-  - Çift taraflı tarayıcılardan geçen evrakların arkasındaki bomboş beyaz sayfaları piksel analiziyle tespit edip siler.
-
-==================================================
-5. METİN İŞLEMLERİ & VERİ GÜVENLİĞİ
-==================================================
-• 🕶 KVKK Akıllı Karartma (Redaction):
-  - T.C. Kimlik Numaralarını, IBAN'ları ve telefon numaralarını kalıcı olarak maskeler.
-  - Özel isim veya kelimeleri de gizleyebilirsiniz.
-  - Metin katmanı PDF belleğinden tamamen kazınır, geri alınamaz.
-
-• 📄 UDF ➔ Word (.docx):
-  - UYAP '.udf' evraklarını Microsoft Word (.docx) formatına dönüştürür.
-
-• 🔍 Metin Kopyala:
-  - Belgedeki tüm metinleri önizleme ekranında listeler ve tek tıkla panoya kopyalar.
-"""
-        metin_alani.insert(tk.END, rehber_icerik.strip())
-        metin_alani.config(state="disabled")
-
-        tk.Button(
-            pencere,
-            text="Anladım, Kapat",
-            command=pencere.destroy,
-            bg="#1B263B",
-            fg="white",
-            font=("Segoe UI", 9, "bold"),
-            relief="flat",
-            pady=5
-        ).pack(fill="x", padx=12, pady=(0, 8))
-
-    # ========================================================
-    # KVKK AKILLI KARARTMA (REDACTION) MODÜLÜ
-    # ========================================================
-    def akilli_karartma_penceresi(self):
-        kaynak_yol = self._secili_dosya_al()
-        if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
-            messagebox.showwarning("Geçersiz Dosya", "Akıllı Karartma yalnızca PDF dosyaları için geçerlidir.")
-            return
-
-        pencere = tk.Toplevel(self.root)
-        pencere.title("KVKK Akıllı Karartma")
-        pencere.geometry("450x390")
-        pencere.resizable(False, False)
-        pencere.configure(bg="#F4F6F9")
-
-        tk.Label(
-            pencere,
-            text="🕶 Kalıcı Veri Karartma / Maskeleme",
-            font=("Segoe UI", 11, "bold"),
-            bg="#1B263B",
-            fg="white",
-            pady=6
-        ).pack(fill="x")
-
-        icerik = tk.Frame(pencere, bg="#F4F6F9", padx=16, pady=8)
-        icerik.pack(fill="both", expand=True)
-
-        var_tc = tk.BooleanVar(value=True)
-        tk.Checkbutton(icerik, text="11 Haneli T.C. Kimlik Numaralarını Gizle", variable=var_tc, bg="#F4F6F9", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=2)
-
-        var_iban = tk.BooleanVar(value=True)
-        tk.Checkbutton(icerik, text="IBAN Numaralarını Gizle (TR...)", variable=var_iban, bg="#F4F6F9", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=2)
-
-        var_tel = tk.BooleanVar(value=False)
-        tk.Checkbutton(icerik, text="Telefon Numaralarını Gizle (05xx / +90)", variable=var_tel, bg="#F4F6F9", font=("Segoe UI", 8)).pack(anchor="w", pady=2)
-
-        tk.Label(icerik, text="Özel İsim / Kelimeleri Gizle (Virgülle ayırın):", bg="#F4F6F9", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(8, 2))
-        ozel_entry = tk.Entry(icerik, font=("Segoe UI", 9), width=45)
-        ozel_entry.pack(fill="x", pady=2)
-
-        def islemi_baslat():
-            hedef_yol = filedialog.asksaveasfilename(
-                defaultextension=".pdf",
-                filetypes=[("PDF Dosyası", "*.pdf")],
-                title="Karartılmış PDF'i Kaydet",
-                initialfile="karartilmis_" + os.path.basename(kaynak_yol)
-            )
-            if not hedef_yol:
-                return
-
+    def _thread_calistir(self, fn):
+        def gorev():
+            self.after(0, self.progress_bar.start)
             try:
-                doc = pymupdf.open(kaynak_yol)
-                toplam_maskeleme = 0
-                regex_listesi = []
-                if var_tc.get():
-                    regex_listesi.append(r'\b[1-9][0-9]{10}\b')
-                if var_iban.get():
-                    regex_listesi.append(r'TR\s*[0-9]{2}(?:\s*[0-9]{4}){5}\s*[0-9]{2}')
-                if var_tel.get():
-                    regex_listesi.append(r'(?:\+90\s*|0\s*)?5[0-9]{2}[\s\-]?[0-9]{3}[\s\-]?[0-9]{2}[\s\-]?[0-9]{2}')
-
-                ozel_kelimeler = [k.strip() for k in ozel_entry.get().split(',') if k.strip()]
-
-                for sayfa in doc:
-                    sayfa_metni = sayfa.get_text()
-                    for desen in regex_listesi:
-                        for eslesme in re.finditer(desen, sayfa_metni):
-                            aranan = eslesme.group()
-                            for rect in sayfa.search_for(aranan):
-                                sayfa.add_redact_annot(rect, fill=(0, 0, 0))
-                                toplam_maskeleme += 1
-
-                    for kelime in ozel_kelimeler:
-                        for rect in sayfa.search_for(kelime):
-                            sayfa.add_redact_annot(rect, fill=(0, 0, 0))
-                            toplam_maskeleme += 1
-
-                    sayfa.apply_redactions()
-
-                doc.save(hedef_yol, garbage=4, deflate=True)
-                doc.close()
-                pencere.destroy()
-                self.durum_etiketi.config(text=f"Karartma tamamlandı: {toplam_maskeleme} alan maskelendi.")
-                messagebox.showinfo("Başarılı", f"Kalıcı Karartma Uygulandı!\nToplam Maskelenen Veri: {toplam_maskeleme} adet")
-            except Exception as e:
-                messagebox.showerror("Hata", f"Karartma hatası:\n{str(e)}")
-
-        tk.Button(
-            icerik,
-            text="🛡 Karart ve Yeni PDF Olarak Kaydet",
-            command=islemi_baslat,
-            bg="#212529",
-            fg="#FFC107",
-            font=("Segoe UI", 9, "bold"),
-            relief="flat",
-            pady=6
-        ).pack(fill="x", pady=(12, 0))
+                fn()
+            finally:
+                self.after(0, self.progress_bar.stop)
+                self.after(0, lambda: self.progress_bar.set(0))
+        threading.Thread(target=gorev, daemon=True).start()
 
     # ========================================================
-    # UDF ➔ WORD (.docx) DÖNÜŞTÜRÜCÜ
+    # 1. BİRLEŞTİRME VE OPTİMİZASYON İŞLEMLERİ
     # ========================================================
-    def udf_to_word(self):
-        kaynak_yol = self._secili_dosya_al()
-        if not kaynak_yol or not kaynak_yol.lower().endswith('.udf'):
-            messagebox.showwarning("Hatalı Dosya", "Lütfen listeden bir UDF (.udf) dosyası seçin.")
-            return
-
-        hedef_yol = filedialog.asksaveasfilename(
-            defaultextension=".docx",
-            filetypes=[("Word Belgesi", "*.docx")],
-            title="Word (.docx) Olarak Kaydet",
-            initialfile=os.path.splitext(os.path.basename(kaynak_yol))[0] + ".docx"
-        )
-        if not hedef_yol:
-            return
-
-        try:
-            self.durum_etiketi.config(text="UDF içeriği Word'e aktarılıyor...")
-            self.root.update()
-
-            with zipfile.ZipFile(kaynak_yol, 'r') as zf:
-                if 'content.xml' not in zf.namelist():
-                    raise ValueError("Geçersiz UDF dosyası: 'content.xml' bulunamadı.")
-                xml_raw = zf.read('content.xml')
-
-            root_xml = ET.fromstring(xml_raw)
-            yeni_docx = docx.Document()
-            paragraf_bulundu = False
-
-            content_node = root_xml.find('content')
-            if content_node is not None and content_node.text:
-                for satir in content_node.text.splitlines():
-                    yeni_docx.add_paragraph(satir.replace('\u200B', ''))
-                paragraf_bulundu = True
-
-            if not paragraf_bulundu:
-                elements_node = root_xml.find('elements')
-                if elements_node is not None:
-                    for elem in elements_node.findall('.//paragraph'):
-                        p_metin = "".join(elem.itertext()).strip().replace('\u200B', '')
-                        yeni_docx.add_paragraph(p_metin)
-                    paragraf_bulundu = True
-
-            if not paragraf_bulundu:
-                tum_metin = "".join(root_xml.itertext()).replace('\u200B', '')
-                for satir in tum_metin.splitlines():
-                    if satir.strip():
-                        yeni_docx.add_paragraph(satir)
-
-            yeni_docx.save(hedef_yol)
-            self.durum_etiketi.config(text="UDF ➔ Word dönüşümü tamamlandı.")
-            messagebox.showinfo("Başarılı", f"UDF belgesi Word formatına aktarıldı!\n\nDosya: {os.path.basename(hedef_yol)}")
-        except Exception as e:
-            messagebox.showerror("Hata", f"Word belgesi oluşturulurken hata oluştu:\n{str(e)}")
-
-    # ========================================================
-    # DİĞER PDF İŞLEMLERİ (BİRLEŞTİR, SIKIŞTIR, BÖL)
-    # ========================================================
-    def _gorseli_a4_sayfaya_ekle(self, gorsel_yolu, hedef_doc, kalite):
-        a4_w, a4_h = 595.0, 842.0
-        yeni_sayfa = hedef_doc.new_page(width=a4_w, height=a4_h)
-
+    def _gorseli_a4_sayfaya_ekle(self, gorsel_yolu, hedef_doc):
         with Image.open(gorsel_yolu) as img:
-            if img.mode in ("RGBA", "P", "CMYK"):
+            img = ImageOps.exif_transpose(img)
+            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                arka_plan = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode == "P":
+                    img = img.convert("RGBA")
+                mask = img.split()[-1]
+                arka_plan.paste(img, mask=mask)
+                img = arka_plan
+            elif img.mode != "RGB":
                 img = img.convert("RGB")
-            
-            margin = 36.0
+
+            img_w, img_h = img.size
+            if img_w > img_h:
+                a4_w, a4_h = 842.0, 595.0
+            else:
+                a4_w, a4_h = 595.0, 842.0
+
+            yeni_sayfa = hedef_doc.new_page(width=a4_w, height=a4_h)
+            margin = 28.0
             kullanilabilir_w = a4_w - (2 * margin)
             kullanilabilir_h = a4_h - (2 * margin)
 
-            img_w, img_h = img.size
             oran = min(kullanilabilir_w / img_w, kullanilabilir_h / img_h)
             cizim_w = img_w * oran
             cizim_h = img_h * oran
 
-            x0 = (a4_w - cizim_w) / 2
-            y0 = (a4_h - cizim_h) / 2
+            x0 = (a4_w - cizim_w) / 2.0
+            y0 = (a4_h - cizim_h) / 2.0
             rect = pymupdf.Rect(x0, y0, x0 + cizim_w, y0 + cizim_h)
 
-            img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format="JPEG", quality=kalite, optimize=True)
-            yeni_sayfa.insert_image(rect, stream=img_byte_arr.getvalue())
-
-    def _pdf_sayfalarini_optimize_et(self, kaynak_doc, hedef_doc, dpi, kalite):
-        for sayfa in kaynak_doc:
-            pix = sayfa.get_pixmap(dpi=dpi)
-            resim_bytes = pix.pil_tobytes(format="JPEG", quality=kalite, optimize=True)
-            yeni_sayfa = hedef_doc.new_page(width=sayfa.rect.width, height=sayfa.rect.height)
-            yeni_sayfa.insert_image(sayfa.rect, stream=resim_bytes)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=75, optimize=True)
+            yeni_sayfa.insert_image(rect, stream=buf.getvalue())
 
     def _bates_numaralari_bas(self, doc):
         if not self.bates_aktif.get():
             return
         on_ek = self.bates_on_ek.get().strip()
         toplam_sayfa = len(doc)
-
         font_param = {"fontfile": TURKCE_FONT_YOLU, "fontname": "arial_tr"} if TURKCE_FONT_YOLU else {"fontname": "helv"}
 
         for i, sayfa in enumerate(doc):
             sayfa_no = i + 1
             metin = f"{on_ek} | Sayfa {sayfa_no} / {toplam_sayfa}" if on_ek else f"Sayfa {sayfa_no} / {toplam_sayfa}"
             w, h = sayfa.rect.width, sayfa.rect.height
-            rect = pymupdf.Rect(0, h - 26, w, h - 8)
+            rect = pymupdf.Rect(0, h - 24, w, h - 6)
             sayfa.insert_textbox(
                 rect,
                 metin,
@@ -1242,45 +786,49 @@ Bu yazılım; adliye, icra ve UYAP evrak süreçlerinde karşılaşılan teknik 
     def tumunu_birlestir_pdf_yap(self):
         pdf_ve_resimler = [d for d in self.dosyalar if d.lower().endswith(('.pdf', '.jpg', '.jpeg', '.png', '.webp', '.bmp'))]
         if not pdf_ve_resimler:
-            messagebox.showwarning("Geçerli Dosya Yok", "Birleştirmek için listede PDF veya görsel dosyası bulunmalıdır.")
+            messagebox.showwarning("Evrak Yok", "Birleştirmek için listeye PDF veya görsel ekleyin.")
             return
 
         hedef_yol = filedialog.asksaveasfilename(
             defaultextension=".pdf",
             filetypes=[("PDF Dosyası", "*.pdf")],
-            title="Oluşturulacak PDF'i Kaydet",
+            title="Birleştirilmiş PDF'i Kaydet",
             initialfile="uyap_birlestirilmis_evrak.pdf"
         )
         if not hedef_yol:
             return
 
         try:
-            self.durum_etiketi.config(text="PDF oluşturuluyor...")
-            self.root.update()
-
+            self.durum_etiketi.configure(text="Evraklar birleştiriliyor...")
             toplam_eski_boyut = sum(os.path.getsize(d) for d in pdf_ve_resimler) / (1024 * 1024)
-            dpi = 100 if self.mod_secimi.get() == "maksimum" else 150
-            kalite = 50 if self.mod_secimi.get() == "maksimum" else 70
 
             yeni_doc = pymupdf.open()
+            mod = self.mod_secimi.get()
+
             for dosya in pdf_ve_resimler:
                 uzanti = os.path.splitext(dosya)[1].lower()
                 if uzanti == '.pdf':
-                    kaynak_pdf = pymupdf.open(dosya)
-                    self._pdf_sayfalarini_optimize_et(kaynak_pdf, yeni_doc, dpi, kalite)
-                    kaynak_pdf.close()
+                    with pymupdf.open(dosya) as k_doc:
+                        if mod == "maksimum_raster":
+                            for sayfa in k_doc:
+                                pix = sayfa.get_pixmap(dpi=150)
+                                resim_bytes = pix.pil_tobytes(format="JPEG", quality=65, optimize=True)
+                                s = yeni_doc.new_page(width=sayfa.rect.width, height=sayfa.rect.height)
+                                s.insert_image(sayfa.rect, stream=resim_bytes)
+                        else:
+                            yeni_doc.insert_pdf(k_doc)
                 else:
-                    self._gorseli_a4_sayfaya_ekle(dosya, yeni_doc, kalite)
+                    self._gorseli_a4_sayfaya_ekle(dosya, yeni_doc)
 
             self._bates_numaralari_bas(yeni_doc)
-            yeni_doc.save(hedef_yol, garbage=4, deflate=True)
+            yeni_doc.save(hedef_yol, garbage=4, deflate=True, clean=True)
             yeni_doc.close()
 
             yeni_boyut = os.path.getsize(hedef_yol) / (1024 * 1024)
-            self.durum_etiketi.config(text=f"Tamamlandı: {yeni_boyut:.2f} MB")
-            messagebox.showinfo("Başarılı", f"PDF'ler birleştirildi!\n\nEski: {toplam_eski_boyut:.2f} MB\nYeni: {yeni_boyut:.2f} MB")
+            self.durum_etiketi.configure(text=f"Birleştirme tamamlandı: {yeni_boyut:.2f} MB")
+            messagebox.showinfo("Başarılı", f"PDF'ler birleştirildi!\n\nEski Toplam: {toplam_eski_boyut:.2f} MB\nYeni Dosya: {yeni_boyut:.2f} MB")
         except Exception as e:
-            messagebox.showerror("Hata", f"İşlem hatası:\n{str(e)}")
+            messagebox.showerror("Hata", f"Birleştirme sırasında hata oluştu:\n{str(e)}")
 
     def pdf_tekil_sikistir(self):
         kaynak_yol = self._secili_dosya_al()
@@ -1293,32 +841,256 @@ Bu yazılım; adliye, icra ve UYAP evrak süreçlerinde karşılaşılan teknik 
             defaultextension=".pdf",
             filetypes=[("PDF Dosyası", "*.pdf")],
             title="Sıkıştırılmış PDF'i Kaydet",
-            initialfile="uyap_kucuk_" + os.path.basename(kaynak_yol)
+            initialfile="kucuk_" + os.path.basename(kaynak_yol)
         )
-        if not hedef_yol:
+        if not hedef_yol or not self._ayni_dosya_kontrolu(kaynak_yol, hedef_yol):
             return
 
         try:
-            self.durum_etiketi.config(text="Sıkıştırılıyor...")
-            self.root.update()
+            self.durum_etiketi.configure(text="PDF optimize ediliyor...")
+            mod = self.mod_secimi.get()
 
-            dpi = 100 if self.mod_secimi.get() == "maksimum" else 150
-            kalite = 50 if self.mod_secimi.get() == "maksimum" else 70
-
-            doc = pymupdf.open(kaynak_yol)
-            yeni_doc = pymupdf.open()
-            self._pdf_sayfalarini_optimize_et(doc, yeni_doc, dpi, kalite)
-            self._bates_numaralari_bas(yeni_doc)
-            yeni_doc.save(hedef_yol, garbage=4, deflate=True)
-            yeni_doc.close()
-            doc.close()
+            with pymupdf.open(kaynak_yol) as doc:
+                if mod == "maksimum_raster":
+                    yeni_doc = pymupdf.open()
+                    for sayfa in doc:
+                        pix = sayfa.get_pixmap(dpi=150)
+                        resim_bytes = pix.pil_tobytes(format="JPEG", quality=60, optimize=True)
+                        s = yeni_doc.new_page(width=sayfa.rect.width, height=sayfa.rect.height)
+                        s.insert_image(sayfa.rect, stream=resim_bytes)
+                    self._bates_numaralari_bas(yeni_doc)
+                    yeni_doc.save(hedef_yol, garbage=4, deflate=True)
+                    yeni_doc.close()
+                else:
+                    self._bates_numaralari_bas(doc)
+                    doc.save(hedef_yol, garbage=4, deflate=True, clean=True)
 
             yeni_boyut = os.path.getsize(hedef_yol) / (1024 * 1024)
-            kazanc = ((eski_boyut - yeni_boyut) / eski_boyut) * 100 if eski_boyut > 0 else 0
-            self.durum_etiketi.config(text=f"Tamamlandı: {eski_boyut:.2f} MB ➔ {yeni_boyut:.2f} MB")
-            messagebox.showinfo("Başarılı", f"Eski: {eski_boyut:.2f} MB\nYeni: {yeni_boyut:.2f} MB\nKazanılan: %{kazanc:.1f}")
+            if yeni_boyut >= eski_boyut:
+                messagebox.showinfo("Bilgi", f"Belge zaten optimize durumdaydı.\nEski: {eski_boyut:.2f} MB\nYeni: {yeni_boyut:.2f} MB")
+            else:
+                kazanc = ((eski_boyut - yeni_boyut) / eski_boyut) * 100
+                messagebox.showinfo("Başarılı", f"Sıkıştırma tamamlandı!\nEski: {eski_boyut:.2f} MB\nYeni: {yeni_boyut:.2f} MB\nKazanılan: %{kazanc:.1f}")
+
+            self.durum_etiketi.configure(text=f"İşlem tamamlandı: {yeni_boyut:.2f} MB")
         except Exception as e:
             messagebox.showerror("Hata", f"Sıkıştırma hatası:\n{str(e)}")
+
+    def pdf_akilli_boyut_bol(self):
+        kaynak_yol = self._secili_dosya_al()
+        if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
+            messagebox.showwarning("Geçersiz Dosya", "Akıllı Boyut Bölücüsü yalnızca PDF dosyaları içindir.")
+            return
+
+        dosya_mb = os.path.getsize(kaynak_yol) / (1024 * 1024)
+        limit_str = simpledialog.askstring(
+            "Hedef Sınır (MB)",
+            f"Dosya Boyutu: {dosya_mb:.2f} MB\n\nHer parçanın azami boyutunu (MB) girin:\n(UYAP için 9.5 MB önerilir)",
+            initialvalue="9.5",
+            parent=self
+        )
+        if not limit_str:
+            return
+
+        try:
+            hedef_limit_mb = float(limit_str.replace(',', '.'))
+            if hedef_limit_mb <= 0:
+                raise ValueError()
+        except Exception:
+            messagebox.showerror("Hata", "Lütfen geçerli bir MB değeri girin!")
+            return
+
+        hedef_limit_bytes = int(hedef_limit_mb * 1024 * 1024)
+        hedef_klasor = filedialog.askdirectory(title="Parçaların Kaydedileceği Klasörü Seçin")
+        if not hedef_klasor:
+            return
+
+        try:
+            self.durum_etiketi.configure(text="Sayfalar tartılıyor ve bölünüyor...")
+            uretilenler = []
+            dosya_kok = os.path.splitext(os.path.basename(kaynak_yol))[0]
+
+            with pymupdf.open(kaynak_yol) as ana_doc:
+                toplam_s = len(ana_doc)
+                parca_no = 1
+                baslangic_idx = 0
+
+                while baslangic_idx < toplam_s:
+                    parca_doc = pymupdf.open()
+                    parca_doc.insert_pdf(ana_doc, from_page=baslangic_idx, to_page=baslangic_idx)
+
+                    ilk_sayfa_boyut = len(parca_doc.tobytes(garbage=3, deflate=True))
+                    if ilk_sayfa_boyut > hedef_limit_bytes:
+                        parca_doc.close()
+                        messagebox.showwarning(
+                            "Aşırı Büyük Sayfa",
+                            f"Sayfa {baslangic_idx + 1} tek başına ({ilk_sayfa_boyut / (1024*1024):.2f} MB) seçilen {hedef_limit_mb} MB sınırını aşıyor!\nBu sayfa ayrı bir parça olarak kaydedilecektir."
+                        )
+                        parca_doc = pymupdf.open()
+                        parca_doc.insert_pdf(ana_doc, from_page=baslangic_idx, to_page=baslangic_idx)
+                        cikti = os.path.join(hedef_klasor, f"{dosya_kok}_parca_{parca_no}.pdf")
+                        parca_doc.save(cikti, garbage=4, deflate=True)
+                        parca_doc.close()
+                        uretilenler.append((os.path.basename(cikti), os.path.getsize(cikti) / (1024 * 1024)))
+                        parca_no += 1
+                        baslangic_idx += 1
+                        continue
+
+                    son_gecerli = baslangic_idx
+                    mevcut_idx = baslangic_idx + 1
+
+                    while mevcut_idx < toplam_s:
+                        parca_doc.insert_pdf(ana_doc, from_page=mevcut_idx, to_page=mevcut_idx)
+                        boyut = len(parca_doc.tobytes(garbage=3, deflate=True))
+                        if boyut > hedef_limit_bytes:
+                            parca_doc.delete_page(len(parca_doc) - 1)
+                            break
+                        else:
+                            son_gecerli = mevcut_idx
+                            mevcut_idx += 1
+
+                    cikti = os.path.join(hedef_klasor, f"{dosya_kok}_parca_{parca_no}.pdf")
+                    parca_doc.save(cikti, garbage=4, deflate=True)
+                    parca_doc.close()
+
+                    uretilenler.append((os.path.basename(cikti), os.path.getsize(cikti) / (1024 * 1024)))
+                    parca_no += 1
+                    baslangic_idx = son_gecerli + 1
+
+            ozet = "\n".join([f"• {ad}: {b:.2f} MB" for ad, b in uretilenler])
+            self.durum_etiketi.configure(text=f"{len(uretilenler)} parça üretildi.")
+            messagebox.showinfo("Bölme Tamamlandı", f"Belge {len(uretilenler)} parçaya bölündü:\n\n{ozet}\n\nKlasör: {hedef_klasor}")
+        except Exception as e:
+            messagebox.showerror("Hata", f"Boyut bölme hatası:\n{str(e)}")
+
+    # ========================================================
+    # 2. SAYFALAR İŞLEMLERİ
+    # ========================================================
+    def pdf_dondur_penceresi(self):
+        kaynak_yol = self._secili_dosya_al()
+        if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
+            messagebox.showwarning("Geçersiz Dosya", "Sayfa Döndürme yalnızca PDF dosyaları içindir.")
+            return
+
+        with pymupdf.open(kaynak_yol) as d_temp:
+            toplam_sayfa = len(d_temp)
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Sayfa Döndür & Yön Düzelt")
+        dialog.geometry("400x260")
+        dialog.resizable(False, False)
+        dialog.after(100, dialog.lift)
+
+        ctk.CTkLabel(dialog, text=f"Toplam Sayfa: {toplam_sayfa}", font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold")).pack(pady=(14, 6))
+
+        derece_var = ctk.IntVar(value=90)
+        radio_bar = ctk.CTkFrame(dialog, fg_color="transparent")
+        radio_bar.pack(pady=4)
+
+        ctk.CTkRadioButton(radio_bar, text="90° Sağa", variable=derece_var, value=90).pack(side="left", padx=8)
+        ctk.CTkRadioButton(radio_bar, text="90° Sola", variable=derece_var, value=270).pack(side="left", padx=8)
+        ctk.CTkRadioButton(radio_bar, text="180°", variable=derece_var, value=180).pack(side="left", padx=8)
+
+        ctk.CTkLabel(dialog, text="Döndürülecek Sayfalar (Örn: 1-3, 5 | Boşsa tümü):", font=ctk.CTkFont(family="Segoe UI", size=11)).pack(pady=(10, 2))
+        aralik_entry = ctk.CTkEntry(dialog, width=280)
+        aralik_entry.pack(pady=2)
+
+        def dondur_kaydet():
+            try:
+                secilenler = sayfa_araligi_ayristir(aralik_entry.get().strip(), toplam_sayfa)
+            except ValueError as ve:
+                messagebox.showerror("Aralık Hatası", str(ve))
+                return
+
+            hedef_yol = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("PDF Dosyası", "*.pdf")],
+                title="Döndürülmüş PDF'i Kaydet",
+                initialfile="dondurulmus_" + os.path.basename(kaynak_yol)
+            )
+            if not hedef_yol or not self._ayni_dosya_kontrolu(kaynak_yol, hedef_yol):
+                return
+
+            try:
+                with pymupdf.open(kaynak_yol) as doc:
+                    derece = derece_var.get()
+                    for idx in secilenler:
+                        sayfa = doc[idx]
+                        sayfa.set_rotation((sayfa.rotation + derece) % 360)
+                    doc.save(hedef_yol, garbage=4, deflate=True)
+
+                dialog.destroy()
+                self.durum_etiketi.configure(text=f"{len(secilenler)} sayfa döndürüldü.")
+                messagebox.showinfo("Başarılı", f"{len(secilenler)} sayfa döndürüldü ve kaydedildi!")
+            except Exception as e:
+                messagebox.showerror("Hata", f"Döndürme hatası:\n{str(e)}")
+
+        ctk.CTkButton(dialog, text="Uygula ve Kaydet", command=dondur_kaydet, fg_color="#0F172A", hover_color="#1E293B", corner_radius=8).pack(pady=16)
+
+    def pdf_bos_sayfalari_temizle(self):
+        kaynak_yol = self._secili_dosya_al()
+        if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
+            messagebox.showwarning("Geçersiz Dosya", "Boş sayfa temizleme yalnızca PDF dosyaları içindir.")
+            return
+
+        silinecekler = []
+        try:
+            self.durum_etiketi.configure(text="Sayfalar taranıyor...")
+            with pymupdf.open(kaynak_yol) as doc:
+                toplam_s = len(doc)
+                for i in range(toplam_s):
+                    sayfa = doc[i]
+                    if sayfa.get_text().strip():
+                        continue
+
+                    pix = sayfa.get_pixmap(dpi=36, colorspace=pymupdf.csGRAY)
+                    img = Image.frombytes("L", [pix.width, pix.height], pix.samples)
+                    hist = img.histogram()
+                    toplam_piksel = pix.width * pix.height
+                    oran = sum(hist[:240]) / float(toplam_piksel)
+
+                    if oran < 0.0008:
+                        silinecekler.append(i)
+
+            if not silinecekler:
+                messagebox.showinfo("Bilgi", "Belgede boş sayfa tespit edilmedi.")
+                self.durum_etiketi.configure(text="Boş sayfa bulunamadı.")
+                return
+
+            if len(silinecekler) == toplam_s:
+                messagebox.showwarning("Uyarı", "Belgedeki tüm sayfalar boş görünüyor. Dosyanın tamamı silinemez.")
+                return
+
+            silinecek_str = ", ".join([str(s + 1) for s in silinecekler])
+            onay = messagebox.askyesno(
+                "Boş Sayfa Silme Onayı",
+                f"Şu sayfalar boş tespit edildi:\nSayfa No: {silinecek_str}\n\nBu sayfalar silinip yeni PDF oluşturulsun mu?"
+            )
+            if not onay:
+                return
+
+            hedef_yol = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("PDF Dosyası", "*.pdf")],
+                title="Temizlenmiş PDF'i Kaydet",
+                initialfile="temiz_" + os.path.basename(kaynak_yol)
+            )
+            if not hedef_yol or not self._ayni_dosya_kontrolu(kaynak_yol, hedef_yol):
+                return
+
+            with pymupdf.open(kaynak_yol) as doc:
+                yeni_doc = pymupdf.open()
+                silinecek_set = set(silinecekler)
+                for idx in range(len(doc)):
+                    if idx not in silinecek_set:
+                        yeni_doc.insert_pdf(doc, from_page=idx, to_page=idx)
+                yeni_doc.save(hedef_yol, garbage=4, deflate=True)
+                yeni_doc.close()
+
+            self.durum_etiketi.configure(text=f"{len(silinecekler)} boş sayfa temizlendi.")
+            messagebox.showinfo("Başarılı", f"Toplam {len(silinecekler)} sayfa temizlendi!\nDosya: {os.path.basename(hedef_yol)}")
+        except Exception as e:
+            messagebox.showerror("Hata", f"Boş sayfa temizleme hatası:\n{str(e)}")
 
     def pdf_sayfa_sayfa_bol(self):
         kaynak_yol = self._secili_dosya_al()
@@ -1331,20 +1103,18 @@ Bu yazılım; adliye, icra ve UYAP evrak süreçlerinde karşılaşılan teknik 
             return
 
         try:
-            doc = pymupdf.open(kaynak_yol)
-            toplam_sayfa = len(doc)
-            dosya_kok = os.path.splitext(os.path.basename(kaynak_yol))[0]
+            with pymupdf.open(kaynak_yol) as doc:
+                toplam = len(doc)
+                kok = os.path.splitext(os.path.basename(kaynak_yol))[0]
+                for i in range(toplam):
+                    tekil = pymupdf.open()
+                    tekil.insert_pdf(doc, from_page=i, to_page=i)
+                    tekil.save(os.path.join(hedef_klasor, f"{kok}_sayfa_{i + 1}.pdf"), garbage=4, deflate=True)
+                    tekil.close()
 
-            for i in range(toplam_sayfa):
-                tekil = pymupdf.open()
-                tekil.insert_pdf(doc, from_page=i, to_page=i)
-                tekil.save(os.path.join(hedef_klasor, f"{dosya_kok}_sayfa_{i + 1}.pdf"), garbage=4, deflate=True)
-                tekil.close()
-
-            doc.close()
-            messagebox.showinfo("Başarılı", f"{toplam_sayfa} sayfa başarıyla ayrıldı!\nKlasör: {hedef_klasor}")
+            messagebox.showinfo("Başarılı", f"{toplam} sayfa başarıyla ayrıldı!\nKlasör: {hedef_klasor}")
         except Exception as e:
-            messagebox.showerror("Hata", f"Sayfalara bölerken hata:\n{str(e)}")
+            messagebox.showerror("Hata", f"Sayfa bölme hatası:\n{str(e)}")
 
     def pdf_aralik_bol(self):
         kaynak_yol = self._secili_dosya_al()
@@ -1352,67 +1122,173 @@ Bu yazılım; adliye, icra ve UYAP evrak süreçlerinde karşılaşılan teknik 
             messagebox.showwarning("Geçersiz Dosya", "Bu özellik yalnızca PDF dosyaları içindir.")
             return
 
-        doc = pymupdf.open(kaynak_yol)
-        toplam_sayfa = len(doc)
+        with pymupdf.open(kaynak_yol) as d:
+            toplam_sayfa = len(d)
 
-        aralik_metni = simpledialog.askstring("Sayfa Seçimi", f"Toplam Sayfa: {toplam_sayfa}\nAlmak istediğiniz sayfalar (Örn: 1-3, 5):", parent=self.root)
+        aralik_metni = simpledialog.askstring("Sayfa Seçimi", f"Toplam Sayfa: {toplam_sayfa}\nAlmak istediğiniz sayfalar (Örn: 1-3, 5):", parent=self)
         if not aralik_metni:
-            doc.close()
-            return
-
-        secilen_indeksler = set()
-        try:
-            for parca in aralik_metni.split(','):
-                parca = parca.strip()
-                if '-' in parca:
-                    b, s = map(int, parca.split('-'))
-                    for i in range(b, s + 1):
-                        if 1 <= i <= toplam_sayfa:
-                            secilen_indeksler.add(i - 1)
-                else:
-                    i = int(parca)
-                    if 1 <= i <= toplam_sayfa:
-                        secilen_indeksler.add(i - 1)
-        except Exception:
-            doc.close()
-            messagebox.showerror("Hata", "Geçersiz format! Örn: 1-3, 5")
-            return
-
-        hedef_yol = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF Dosyası", "*.pdf")], title="Ayrılan Sayfaları Kaydet", initialfile=f"ayrilan_{os.path.basename(kaynak_yol)}")
-        if not hedef_yol:
-            doc.close()
             return
 
         try:
-            yeni = pymupdf.open()
-            for idx in sorted(list(secilen_indeksler)):
-                yeni.insert_pdf(doc, from_page=idx, to_page=idx)
-            yeni.save(hedef_yol, garbage=4, deflate=True)
-            yeni.close()
-            doc.close()
-            messagebox.showinfo("Başarılı", f"Seçilen {len(secilen_indeksler)} sayfa kaydedildi!")
+            secilenler = sayfa_araligi_ayristir(aralik_metni.strip(), toplam_sayfa)
+        except ValueError as ve:
+            messagebox.showerror("Hata", str(ve))
+            return
+
+        hedef_yol = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF Dosyası", "*.pdf")],
+            title="Ayrılan Sayfaları Kaydet",
+            initialfile=f"ayrilan_{os.path.basename(kaynak_yol)}"
+        )
+        if not hedef_yol or not self._ayni_dosya_kontrolu(kaynak_yol, hedef_yol):
+            return
+
+        try:
+            with pymupdf.open(kaynak_yol) as doc:
+                yeni = pymupdf.open()
+                for idx in sorted(list(secilenler)):
+                    yeni.insert_pdf(doc, from_page=idx, to_page=idx)
+                yeni.save(hedef_yol, garbage=4, deflate=True)
+                yeni.close()
+
+            messagebox.showinfo("Başarılı", f"Seçilen {len(secilenler)} sayfa ayrıldı ve kaydedildi!")
         except Exception as e:
             messagebox.showerror("Hata", f"İşlem hatası:\n{str(e)}")
+
+    # ========================================================
+    # 3. DÖNÜŞTÜR İŞLEMLERİ
+    # ========================================================
+    def udf_to_word(self):
+        kaynak_yol = None
+        if hasattr(self, "secili_dosya_indeksi") and self.secili_dosya_indeksi is not None and self.dosyalar:
+            aday = self.dosyalar[self.secili_dosya_indeksi]
+            if aday.lower().endswith('.udf'):
+                kaynak_yol = aday
+
+        if not kaynak_yol:
+            kaynak_yol = filedialog.askopenfilename(
+                title="Dönüştürülecek UDF Dosyasını Seçin",
+                filetypes=[("UYAP UDF Dosyaları", "*.udf")]
+            )
+
+        if not kaynak_yol:
+            return
+
+        hedef_yol = filedialog.asksaveasfilename(
+            defaultextension=".docx",
+            filetypes=[("Word Belgesi", "*.docx")],
+            title="Word (.docx) Olarak Kaydet",
+            initialfile=os.path.splitext(os.path.basename(kaynak_yol))[0] + ".docx"
+        )
+        if not hedef_yol:
+            return
+
+        try:
+            self.durum_etiketi.configure(text="UDF içeriği Word'e aktarılıyor...")
+            with zipfile.ZipFile(kaynak_yol, 'r') as zf:
+                if 'content.xml' not in zf.namelist():
+                    raise ValueError("Geçersiz UDF: 'content.xml' bulunamadı.")
+                xml_raw = zf.read('content.xml')
+
+            root_xml = ET.fromstring(xml_raw)
+            yeni_docx = docx.Document()
+            paragraf_eklendi = False
+
+            content_node = root_xml.find('content')
+            if content_node is not None and content_node.text and content_node.text.strip():
+                for satir in content_node.text.splitlines():
+                    yeni_docx.add_paragraph(satir.replace('\u200B', ''))
+                paragraf_eklendi = True
+
+            if not paragraf_eklendi:
+                elements_node = root_xml.find('elements')
+                if elements_node is not None:
+                    p_list = elements_node.findall('.//paragraph')
+                    if p_list:
+                        for elem in p_list:
+                            p_metin = "".join(elem.itertext()).strip().replace('\u200B', '')
+                            yeni_docx.add_paragraph(p_metin)
+                        paragraf_eklendi = True
+
+            if not paragraf_eklendi:
+                tum_metin = "".join(root_xml.itertext()).replace('\u200B', '')
+                for satir in tum_metin.splitlines():
+                    if satir.strip():
+                        yeni_docx.add_paragraph(satir)
+
+            yeni_docx.save(hedef_yol)
+            self.durum_etiketi.configure(text="UDF ➔ Word aktarımı tamamlandı.")
+            messagebox.showinfo("Başarılı", f"UDF belgesi Word formatına dönüştürüldü!\nDosya: {os.path.basename(hedef_yol)}")
+        except Exception as e:
+            messagebox.showerror("Hata", f"Word dönüşüm hatası:\n{str(e)}")
+
+    def word_to_pdf(self):
+        kaynak_yol = None
+        if hasattr(self, "secili_dosya_indeksi") and self.secili_dosya_indeksi is not None and self.dosyalar:
+            aday = self.dosyalar[self.secili_dosya_indeksi]
+            if aday.lower().endswith('.docx'):
+                kaynak_yol = aday
+
+        if not kaynak_yol:
+            kaynak_yol = filedialog.askopenfilename(
+                title="Dönüştürülecek Word (.docx) Dosyasını Seçin",
+                filetypes=[("Word Belgeleri", "*.docx")]
+            )
+
+        if not kaynak_yol:
+            return
+
+        hedef_yol = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF Dosyası", "*.pdf")],
+            title="PDF Olarak Kaydet",
+            initialfile=os.path.splitext(os.path.basename(kaynak_yol))[0] + ".pdf"
+        )
+        if not hedef_yol or not self._ayni_dosya_kontrolu(kaynak_yol, hedef_yol):
+            return
+
+        try:
+            self.durum_etiketi.configure(text="Word belgesi PDF'e dönüştürülüyor...")
+            if docx_to_pdf_convert is not None:
+                docx_to_pdf_convert(kaynak_yol, hedef_yol)
+            else:
+                import win32com.client
+                word = win32com.client.Dispatch("Word.Application")
+                word.Visible = False
+                doc = word.Documents.Open(os.path.abspath(kaynak_yol))
+                doc.SaveAs(os.path.abspath(hedef_yol), FileFormat=17)
+                doc.Close()
+                word.Quit()
+
+            self.durum_etiketi.configure(text="Word ➔ PDF dönüşümü tamamlandı.")
+            messagebox.showinfo("Başarılı", f"Word belgesi başarıyla PDF'e dönüştürüldü!\nDosya: {os.path.basename(hedef_yol)}")
+        except Exception as e:
+            messagebox.showerror(
+                "Dönüşüm Hatası",
+                f"Word ➔ PDF dönüştürme hatası:\n{str(e)}\n\n"
+                "Not: Bilgisayarınızda Microsoft Word yüklü olmalı ve 'docx2pdf' kütüphanesi kurulu olmalıdır."
+            )
 
     def metin_oku_penceresi(self):
         kaynak_yol = self._secili_dosya_al()
         if not kaynak_yol:
             return
 
-        self.durum_etiketi.config(text="Metinler okunuyor...")
-        self.root.update()
-
+        self.durum_etiketi.configure(text="Metinler okunuyor...")
         metin_icerik = ""
         uzanti = os.path.splitext(kaynak_yol)[1].lower()
 
         try:
             if uzanti == '.pdf':
-                doc = pymupdf.open(kaynak_yol)
-                for i, sayfa in enumerate(doc):
-                    t = sayfa.get_text()
-                    if t.strip():
-                        metin_icerik += f"\n--- [ Sayfa {i + 1} ] ---\n" + t
-                doc.close()
+                with pymupdf.open(kaynak_yol) as doc:
+                    for i, sayfa in enumerate(doc):
+                        t = sayfa.get_text()
+                        if t.strip():
+                            metin_icerik += f"\n--- [ Sayfa {i + 1} ] ---\n" + t
+            elif uzanti == '.docx':
+                doc = docx.Document(kaynak_yol)
+                metin_icerik = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
             elif uzanti == '.udf':
                 with zipfile.ZipFile(kaynak_yol, 'r') as zf:
                     if 'content.xml' in zf.namelist():
@@ -1424,36 +1300,265 @@ Bu yazılım; adliye, icra ve UYAP evrak süreçlerinde karşılaşılan teknik 
                             metin_icerik = "".join(root_xml.itertext()).replace('\u200B', '')
 
             if not metin_icerik.strip():
-                metin_icerik = "Kopyalanabilir metin bulunamadı."
+                metin_icerik = "Kopyalanabilir metin katmanı bulunamadı.\n(Belge taranmış bir görsel olabilir.)"
 
-            pencere = tk.Toplevel(self.root)
+            pencere = ctk.CTkToplevel(self)
             pencere.title(f"Metin Önizleme: {os.path.basename(kaynak_yol)}")
-            pencere.geometry("640x480")
+            pencere.geometry("640x500")
+            pencere.after(100, pencere.lift)
 
-            # İkincil pencere ikonu
-            ico_yolu = resource_path("logo.ico")
-            if os.path.exists(ico_yolu):
-                try:
-                    pencere.iconbitmap(ico_yolu)
-                except Exception:
-                    pass
-
-            txt = scrolledtext.ScrolledText(pencere, wrap=tk.WORD, font=("Consolas", 10))
-            txt.pack(fill="both", expand=True, padx=10, pady=10)
-            txt.insert(tk.END, metin_icerik)
+            txt = ctk.CTkTextbox(pencere, font=ctk.CTkFont(family="Consolas", size=12))
+            txt.pack(fill="both", expand=True, padx=16, pady=(16, 10))
+            txt.insert("0.0", metin_icerik)
 
             def kopyala():
                 pencere.clipboard_clear()
-                pencere.clipboard_append(txt.get("1.0", tk.END))
+                pencere.clipboard_append(txt.get("0.0", "end"))
                 messagebox.showinfo("Kopyalandı", "Metin panoya kopyalandı!")
 
-            tk.Button(pencere, text="📋 Panoya Kopyala", command=kopyala, bg="#0D6EFD", fg="white", font=("Segoe UI", 9, "bold")).pack(pady=5)
-            self.durum_etiketi.config(text="Metin okundu.")
+            ctk.CTkButton(pencere, text="📋 Panoya Kopyala", command=kopyala, fg_color="#0F172A", hover_color="#1E293B", corner_radius=8).pack(pady=(0, 16))
+            self.durum_etiketi.configure(text="Metin hazır.")
         except Exception as e:
             messagebox.showerror("Hata", f"Metin okunamadı:\n{str(e)}")
 
+    # ========================================================
+    # 4. KVKK & KAŞE İŞLEMLERİ
+    # ========================================================
+    def pdf_kase_ekle_penceresi(self):
+        kaynak_yol = self._secili_dosya_al()
+        if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
+            messagebox.showwarning("Geçersiz Dosya", "Kaşe Ekleme yalnızca PDF dosyaları içindir.")
+            return
+
+        with pymupdf.open(kaynak_yol) as doc_temp:
+            toplam_sayfa = len(doc_temp)
+
+        bugun = datetime.datetime.now().strftime("%d.%m.%Y")
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Dijital 'Aslı Gibidir' Kaşesi")
+        dialog.geometry("440x480")
+        dialog.resizable(False, False)
+        dialog.after(100, dialog.lift)
+
+        ctk.CTkLabel(dialog, text="Kaşe Başlığı:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(12, 2))
+        baslik_entry = ctk.CTkEntry(dialog)
+        baslik_entry.insert(0, "ASLI GİBİDİR")
+        baslik_entry.pack(fill="x", padx=20)
+
+        ctk.CTkLabel(dialog, text="Avukat İsim / Sicil No / Unvan:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
+        avukat_entry = ctk.CTkEntry(dialog, placeholder_text="Av. Ad Soyad - Baro Sicil No")
+        avukat_entry.pack(fill="x", padx=20)
+
+        ctk.CTkLabel(dialog, text="Tarih / Ek Açıklama:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
+        ek_entry = ctk.CTkEntry(dialog)
+        ek_entry.insert(0, f"Tarih: {bugun}")
+        ek_entry.pack(fill="x", padx=20)
+
+        konum_var = ctk.StringVar(value="sag_alt")
+        ctk.CTkLabel(dialog, text="Konum:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
+        konum_opt = ctk.CTkOptionMenu(
+            dialog,
+            values=["Sağ Alt", "Sol Alt", "Alt Orta", "Sağ Üst"],
+            command=lambda v: konum_var.set({"Sağ Alt": "sag_alt", "Sol Alt": "sol_alt", "Alt Orta": "alt_orta", "Sağ Üst": "sag_ust"}[v])
+        )
+        konum_opt.pack(fill="x", padx=20)
+
+        renk_var = ctk.StringVar(value="kirmizi")
+        renk_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        renk_frame.pack(fill="x", padx=20, pady=8)
+        ctk.CTkRadioButton(renk_frame, text="Kırmızı", variable=renk_var, value="kirmizi").pack(side="left", padx=(0, 14))
+        ctk.CTkRadioButton(renk_frame, text="Lacivert", variable=renk_var, value="lacivert").pack(side="left")
+
+        aralik_entry = ctk.CTkEntry(dialog, placeholder_text="Sayfa No (Boşsa Tümü | Örn: 1, 3-5)")
+        aralik_entry.pack(fill="x", padx=20, pady=8)
+
+        def uygula():
+            try:
+                secilenler = sayfa_araligi_ayristir(aralik_entry.get().strip(), toplam_sayfa)
+            except ValueError as ve:
+                messagebox.showerror("Hata", str(ve))
+                return
+
+            hedef_yol = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("PDF Dosyası", "*.pdf")],
+                title="Kaşeli PDF'i Kaydet",
+                initialfile="kaseli_" + os.path.basename(kaynak_yol)
+            )
+            if not hedef_yol or not self._ayni_dosya_kontrolu(kaynak_yol, hedef_yol):
+                return
+
+            try:
+                with pymupdf.open(kaynak_yol) as doc:
+                    renk = (0.75, 0.05, 0.05) if renk_var.get() == "kirmizi" else (0.0, 0.18, 0.38)
+                    satirlar = [baslik_entry.get().strip(), avukat_entry.get().strip(), ek_entry.get().strip()]
+                    metin = "\n".join([s for s in satirlar if s])
+
+                    font_param = {"fontfile": TURKCE_FONT_YOLU, "fontname": "arial_tr"} if TURKCE_FONT_YOLU else {"fontname": "helv"}
+                    kutu_w, kutu_h = 175.0, 56.0
+                    margin = 20.0
+                    knm = konum_var.get()
+
+                    for idx in secilenler:
+                        sayfa = doc[idx]
+                        w, h = sayfa.rect.width, sayfa.rect.height
+
+                        if knm == "sag_alt":
+                            x0, y0 = w - kutu_w - margin, h - kutu_h - margin
+                        elif knm == "sol_alt":
+                            x0, y0 = margin, h - kutu_h - margin
+                        elif knm == "alt_orta":
+                            x0, y0 = (w - kutu_w) / 2.0, h - kutu_h - margin
+                        else:
+                            x0, y0 = w - kutu_w - margin, margin
+
+                        kutu_rect = pymupdf.Rect(x0, y0, x0 + kutu_w, y0 + kutu_h)
+                        sayfa.draw_rect(kutu_rect, color=renk, width=1.5)
+
+                        ic_rect = pymupdf.Rect(kutu_rect.x0 + 4, kutu_rect.y0 + 4, kutu_rect.x1 - 4, kutu_rect.y1 - 4)
+                        f_size = 9.0
+                        while f_size >= 6.0:
+                            if sayfa.insert_textbox(ic_rect, metin, fontsize=f_size, color=renk, align=pymupdf.TEXT_ALIGN_CENTER, **font_param) >= 0:
+                                break
+                            f_size -= 0.5
+
+                    doc.save(hedef_yol, garbage=4, deflate=True)
+
+                dialog.destroy()
+                self.durum_etiketi.configure(text=f"Kaşe seçilen {len(secilenler)} sayfaya uygulandı.")
+                messagebox.showinfo("Başarılı", f"Kaşe basıldı!\nDosya: {os.path.basename(hedef_yol)}")
+            except Exception as e:
+                messagebox.showerror("Hata", f"Kaşe basma hatası:\n{str(e)}")
+
+        ctk.CTkButton(dialog, text="🛡 Kaşeyi Bas ve Kaydet", command=uygula, fg_color="#0F172A", hover_color="#1E293B", corner_radius=8).pack(pady=16)
+
+    def akilli_karartma_penceresi(self):
+        kaynak_yol = self._secili_dosya_al()
+        if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
+            messagebox.showwarning("Geçersiz Dosya", "Akıllı Karartma yalnızca PDF dosyaları içindir.")
+            return
+
+        with pymupdf.open(kaynak_yol) as d_test:
+            toplam_metin = "".join([s.get_text() for s in d_test]).strip()
+
+        if not toplam_metin:
+            messagebox.showwarning(
+                "Metin Katmanı Yok",
+                "Bu belge taranmış görsel içeriyor ve metin katmanı barındırmıyor.\n"
+                "Otomatik karartma seçilebilir metinlerde uygulanabilir."
+            )
+            return
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("KVKK Akıllı Karartma")
+        dialog.geometry("440x360")
+        dialog.resizable(False, False)
+        dialog.after(100, dialog.lift)
+
+        ctk.CTkLabel(dialog, text="Otomatik Karartma Seçenekleri", font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold")).pack(anchor="w", padx=20, pady=(14, 6))
+
+        var_tc = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(dialog, text="Resmi T.C. Kimlik Algoritmasıyla Doğrulanan Numaralar", variable=var_tc).pack(anchor="w", padx=20, pady=4)
+
+        var_iban = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(dialog, text="IBAN Numaraları (TR...)", variable=var_iban).pack(anchor="w", padx=20, pady=4)
+
+        var_tel = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(dialog, text="Telefon Numaraları (05xx / +90)", variable=var_tel).pack(anchor="w", padx=20, pady=4)
+
+        ctk.CTkLabel(dialog, text="Özel Maskelenecek Kelimeler (Virgülle ayırın):", font=ctk.CTkFont(family="Segoe UI", size=11)).pack(anchor="w", padx=20, pady=(12, 2))
+        ozel_entry = ctk.CTkEntry(dialog, placeholder_text="Örn: Ahmet Yılmaz, Gizli Konu")
+        ozel_entry.pack(fill="x", padx=20)
+
+        def uygula():
+            hedef_yol = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("PDF Dosyası", "*.pdf")],
+                title="Karartılmış PDF'i Kaydet",
+                initialfile="karartilmis_" + os.path.basename(kaynak_yol)
+            )
+            if not hedef_yol or not self._ayni_dosya_kontrolu(kaynak_yol, hedef_yol):
+                return
+
+            try:
+                toplam_mask = 0
+                with pymupdf.open(kaynak_yol) as doc:
+                    ozel_kelimeler = [k.strip() for k in ozel_entry.get().split(',') if k.strip()]
+
+                    for sayfa in doc:
+                        txt = sayfa.get_text()
+
+                        if var_tc.get():
+                            for match in re.finditer(r'\b[1-9]\d{10}\b', txt):
+                                if tc_kimlik_dogrula(match.group()):
+                                    for r in sayfa.search_for(match.group()):
+                                        sayfa.add_redact_annot(r, fill=(0, 0, 0))
+                                        toplam_mask += 1
+
+                        if var_iban.get():
+                            for match in re.finditer(r'TR\s*[0-9]{2}(?:\s*[0-9]{4}){5}\s*[0-9]{2}', txt):
+                                for r in sayfa.search_for(match.group()):
+                                    sayfa.add_redact_annot(r, fill=(0, 0, 0))
+                                    toplam_mask += 1
+
+                        if var_tel.get():
+                            for match in re.finditer(r'(?:\+90\s*|0\s*)?5[0-9]{2}[\s\-]?[0-9]{3}[\s\-]?[0-9]{2}[\s\-]?[0-9]{2}', txt):
+                                for r in sayfa.search_for(match.group()):
+                                    sayfa.add_redact_annot(r, fill=(0, 0, 0))
+                                    toplam_mask += 1
+
+                        for k in ozel_kelimeler:
+                            for r in sayfa.search_for(k):
+                                sayfa.add_redact_annot(r, fill=(0, 0, 0))
+                                toplam_mask += 1
+
+                        sayfa.apply_redactions()
+
+                    doc.scrub(attached_files=True, clean_pages=True, metadata=True)
+                    doc.save(hedef_yol, garbage=4, deflate=True)
+
+                dialog.destroy()
+                self.durum_etiketi.configure(text=f"Karartma tamamlandı: {toplam_mask} veri maskelendi.")
+                messagebox.showinfo("Başarılı", f"Kalıcı Karartma Uygulandı!\nToplam Maskelenen Veri: {toplam_mask} adet\nMetaveriler kazındı.")
+            except Exception as e:
+                messagebox.showerror("Hata", f"Karartma hatası:\n{str(e)}")
+
+        ctk.CTkButton(dialog, text="🛡 Kalıcı Karart ve Kaydet", command=uygula, fg_color="#0F172A", hover_color="#1E293B", corner_radius=8).pack(pady=18)
+
+    def rehber_penceresi_ac(self):
+        pencere = ctk.CTkToplevel(self)
+        pencere.title("Kullanım Rehberi")
+        pencere.geometry("640x520")
+        pencere.resizable(False, False)
+        pencere.after(100, pencere.lift)
+
+        txt = ctk.CTkTextbox(pencere, font=ctk.CTkFont(family="Segoe UI", size=12))
+        txt.pack(fill="both", expand=True, padx=16, pady=16)
+
+        rehber = """UYAP EVRAK ASİSTANI - KULLANIM REHBERİ
+
+1. Birleştir:
+• Belgeleri sol alana sürükleyip 'PDF Yap' ile tek evrak haline getirebilirsiniz.
+• Görsellerin (dekont, tutanak) yönü bozulmaz, otomatik A4 sayfasına oranlanır.
+• Bates numaralandırma işaretlenirse sayfaların altına 'EK-1 | Sayfa 1/5' formatında numara basılır.
+
+2. Sayfalar:
+• Boş sayfaları temizleme butonu çift taraflı taramalardaki boş sayfaları tespit eder ve onayınızı alarak temizler.
+• UYAP Akıllı MB Bölücüsü büyük dosyaları UYAP limitine (9.5 MB) göre sayfa bütünlüğünü bozmadan ayırır.
+
+3. Dönüştür:
+• UDF (.udf) dosyalarını tek tıkla Microsoft Word (.docx) formatına çevirebilirsiniz.
+• Hazırladığınız Word (.docx) dilekçelerini doğrudan resmi UYAP uyumlu PDF'e dönüştürebilirsiniz.
+
+4. KVKK & Kaşe:
+• 'Aslı Gibidir' kaşesi belgenin yönüne duyarlı şekilde otomatik yerleşir.
+• KVKK Karartma modülü yalnızca geçerli T.C. Kimlik numaralarını algoritmayla doğrulayarak ve IBAN'ları tespit ederek maskeler; ardından metaverileri PDF'ten tamamen kazır."""
+
+        txt.insert("0.0", rehber.strip())
+        txt.configure(state="disabled")
+
 
 if __name__ == "__main__":
-    pencere = TkinterDnD.Tk()
-    uygulama = UyapEvrakAsistaniApp(pencere)
-    pencere.mainloop()
+    app = ModernUyapAsistani()
+    app.mainloop()
