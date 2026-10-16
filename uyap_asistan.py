@@ -13,6 +13,11 @@ import docx
 import pymupdf  # PyMuPDF
 import customtkinter as ctk
 
+try:
+    import pythoncom
+except ImportError:
+    pythoncom = None
+
 # Word -> PDF dönüştürücü desteği
 try:
     from docx2pdf import convert as docx_to_pdf_convert
@@ -1248,18 +1253,33 @@ class ModernUyapAsistani(CTkDnD):
         if not hedef_yol or not self._ayni_dosya_kontrolu(kaynak_yol, hedef_yol):
             return
 
+        if pythoncom is not None:
+            pythoncom.CoInitialize()
+
         try:
             self.durum_etiketi.configure(text="Word belgesi PDF'e dönüştürülüyor...")
-            if docx_to_pdf_convert is not None:
-                docx_to_pdf_convert(kaynak_yol, hedef_yol)
-            else:
+            abs_kaynak = os.path.abspath(kaynak_yol)
+            abs_hedef = os.path.abspath(hedef_yol)
+
+            try:
                 import win32com.client
                 word = win32com.client.Dispatch("Word.Application")
                 word.Visible = False
-                doc = word.Documents.Open(os.path.abspath(kaynak_yol))
-                doc.SaveAs(os.path.abspath(hedef_yol), FileFormat=17)
+                doc = word.Documents.Open(abs_kaynak)
+                doc.SaveAs(abs_hedef, FileFormat=17)  # 17 = wdFormatPDF
                 doc.Close()
                 word.Quit()
+            except Exception:
+                if docx_to_pdf_convert is not None:
+                    eski_stderr = sys.stderr
+                    if sys.stderr is None:
+                        sys.stderr = io.StringIO()
+                    try:
+                        docx_to_pdf_convert(abs_kaynak, abs_hedef)
+                    finally:
+                        sys.stderr = eski_stderr
+                else:
+                    raise RuntimeError("Microsoft Word veya docx2pdf motoruna erişilemedi.")
 
             self.durum_etiketi.configure(text="Word ➔ PDF dönüşümü tamamlandı.")
             messagebox.showinfo("Başarılı", f"Word belgesi başarıyla PDF'e dönüştürüldü!\nDosya: {os.path.basename(hedef_yol)}")
@@ -1267,8 +1287,11 @@ class ModernUyapAsistani(CTkDnD):
             messagebox.showerror(
                 "Dönüşüm Hatası",
                 f"Word ➔ PDF dönüştürme hatası:\n{str(e)}\n\n"
-                "Not: Bilgisayarınızda Microsoft Word yüklü olmalı ve 'docx2pdf' kütüphanesi kurulu olmalıdır."
+                "Not: Bilgisayarınızda Microsoft Word yüklü olmalı ve arka planda açık olan Word pencereleri kapatılmalıdır."
             )
+        finally:
+            if pythoncom is not None:
+                pythoncom.CoUninitialize()
 
     def metin_oku_penceresi(self):
         kaynak_yol = self._secili_dosya_al()
