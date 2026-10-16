@@ -4,7 +4,8 @@ UYAP kullanıcıları, avukatlar ve hukuk çalışanları için geliştirilmiş;
 
 ---
 
-<img width="522" height="548" alt="Ekran görüntüsü 2026-10-16 160537" src="https://github.com/user-attachments/assets/7d4a4092-dd75-4875-b14a-49b46395c2f6" />
+<img width="1022" height="730" alt="Ekran görüntüsü 2026-10-13 203444" src="https://github.com/user-attachments/assets/a46de8b8-0680-47e4-8413-1c724d529233" />
+
 
 
 ## 🚀 Özellikler
