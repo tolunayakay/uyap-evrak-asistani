@@ -1,51 +1,109 @@
-# ⚖️ UYAP Evrak Asistanı
+# ⚖️ UYAP Evrak Asistanı (PRO)
 
-UYAP kullanıcıları, avukatlar ve hukuk çalışanları için geliştirilmiş; Word, PDF ve UDF formatındaki belgelerin düzenlenmesini, dönüştürülmesini ve sisteme uygun hale getirilmesini kolaylaştıran masaüstü uygulaması.
+[![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
+[![GUI Framework](https://img.shields.io/badge/GUI-CustomTkinter-blueviolet.svg)](https://github.com/TomSchimansky/CustomTkinter)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
----
+**UYAP Evrak Asistanı**, avukatlar, hukuk büroları ve adliye personeli için tasarlanmış modern, hızlı ve yerel çalışan bir evrak yönetim ve optimizasyon masaüstü uygulamasıdır. UYAP dosya boyutu kısıtlamalarını (MB limitleri), UDF format dönüştürme ihtiyaçlarını ve KVKK kapsamındaki veri gizleme gereksinimlerini tek bir modern arayüzde çözer.
 
-<img width="1173" height="829" alt="uea görsel" src="https://github.com/user-attachments/assets/9cfdc576-e291-420c-ab1f-02ae818ce258" />
-
-
-## 🚀 Özellikler
-
-* **Belge Düzenleme & Dönüştürme:** Word (`.docx`) ve PDF belgeleri üzerinde pratik işlemler.
-* **Sürükle & Bırak Desteği:** Dosyaları kolayca arayüze sürükleyip işleme alma (`tkinterdnd2`).
-* **Hızlı ve Güvenli:** Belgeler tamamen yerel makinede işlenir, harici sunuculara veri aktarılmaz.
+Tüm işlemler **çevrimdışı (offline)** yürütülür; gizli müvekkil ve dava dosyalarınız üçüncü taraf sunuculara gönderilmez.
 
 ---
 
-## 🛠️ Kurulum
+## ✨ Temel Özellikler
 
-Projeyi bilgisayarınızda yerel olarak çalıştırmak için adımları takip edin:
+### 1. 📑 PDF & Görsel Birleştirme & Sıkıştırma
+* **Çoklu Format Desteği:** PDF, JPG, PNG, WEBP, BMP dosyalarını sürükle-bırak yöntemiyle sıraya dizme ve birleştirme.
+* **Akıllı A4 Uyarlama:** Eklenen görseller en-boy oranı korunarak otomatik A4 sayfasına yerleştirilir.
+* **İki Farklı Sıkıştırma Modu:**
+  * **Akıllı Mod (Vektörel):** Metin netliğini korur, gömülü görselleri kayıpsız optimize eder.
+  * **Agresif Raster (150 DPI):** Taranmış ağır evrakları 150 DPI JPEG kalitesine indirgeyerek dosya boyutunu küçültür.
+* **Bates Numaralandırma:** Evrak altlarına `EK-1 | Sayfa 1 / 10` formatında numaralandırma ve ek etiketi basma.
+* **UYAP Akıllı MB Bölücüsü:** UYAP yükleme sınırına (varsayılan 9.5 MB) göre PDF'leri sayfa bütünlüğünü bozmadan otomatik parçalara ayırma.
 
-### 1. Depoyu İndirin (Clone)
-```bash
-git clone https://github.com/tolunayakay/uyap-evrak-asistani.git
-cd uyap-evrak-asistani
-```
+### 2. ✂️ Sayfa Yönetimi
+* **Sayfa Döndürme:** Belirli sayfaları veya tüm belgeyi $90^\circ$, $180^\circ$ veya $270^\circ$ döndürme.
+* **Akıllı Boş Sayfa Temizleme:** Çift taraflı tarayıcılardan kaynaklanan beyaz/boş sayfaları histogram analiziyle tespit edip onay alarak temizler.
+* **Sayfa Sayfa Parçalama:** Her sayfayı bağımsız bir PDF dosyası olarak kaydetme.
+* **Aralık Ayırma:** Belirli sayfaları (`1-3, 5` formatında) seçip yeni bir PDF'e çıkartma.
 
-### 2. Gerekli Kütüphaneleri Yükleyin
-```bash
-pip install -r requirements.txt
-```
+### 3. 🔄 Format Dönüştürücü
+* **UDF ➔ Word (.docx):** UYAP Doküman Editörü (.udf) dosyalarının içindeki XML yapısını çözüp doğrudan Word belgesine çevirme.
+* **Word (.docx) ➔ PDF:** Hazırlanan dilekçeleri Microsoft Word motoru/docx2pdf aracılığıyla tek tıkla resmi PDF formatına dönüştürme.
+* **Metin Önizleme ve Kopyalama:** Taranmamış PDF, Word veya UDF belgelerindeki metinleri ayrıştırıp önizleme ve panoya kopyalama.
 
-### 3. Uygulamayı Başlatın
-```bash
-python uyap_asistan.py
-```
+### 4. 🛡️ Hukuki Güvenlik & KVKK Modülü
+* **"Aslı Gibidir" Dijital Kaşesi:** Belgenin yönüne duyarlı olarak sağ/sol/orta alt veya üst köşelere avukat sicil, isim ve tarih bilgisiyle dijital kaşe uygulama.
+* **KVKK Akıllı Karartma (Kalıcı Redaksiyon):**
+  * **T.C. Kimlik Algoritması:** Yalnızca resmi 11 haneli matematiksel doğrulama algoritmasından geçen gerçek T.C. kimlik numaralarını tespit eder ve üzerini kalıcı olarak siyah bantla çizer.
+  * **IBAN Tespiti:** `TR` ile başlayan IBAN numaralarını otomatik bulur ve maskeler.
+  * **Telefon Maskeleme:** Mobil hat formatlarını (05xx / +90) tespit edip gizler.
+  * **Özel Kelime Maskeleme:** Kullanıcının belirteceği isim, adres vb. kelimeleri sayfa içinde arayıp kalıcı olarak redakte eder.
+  * **Metaveri Kazıma (`doc.scrub`):** Maskelenen dosyanın arkasındaki gizli katmanları, metadata bilgilerini ve ekleri tamamen temizler (metin geri döndürülemez).
 
 ---
 
-## 📦 Kullanılan Başlıca Kütüphaneler
+## 🛠️ Gereksinimler ve Kurulum
 
-* **PyMuPDF (`fitz`):** Yüksek performanslı PDF işleme ve dönüştürme.
-* **python-docx:** Word belgeleri oluşturma ve düzenleme.
-* **Pillow (`PIL`):** Görsel formatlandırma ve optimizasyon.
-* **tkinterdnd2:** Tkinter arayüzü için sürükle-bırak entegrasyonu.
+### Sistem Gereksinimleri
+* **İşletim Sistemi:** Windows 10/11 (macOS ve Linux üzerinde temel özellikler çalışır; Word dönüştürme Windows Word gerektirir)
+* **Python:** Python 3.8 veya üzeri
+
+### Kurulum Adımları
+
+1. Depoyu klonlayın veya indirin:
+   ```bash
+   git clone https://github.com/kullanici-adi/uyap-evrak-asistani.git
+   cd uyap-evrak-asistani
+   ```
+
+2. Gerekli Python kütüphanelerini yükleyin:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Uygulamayı çalıştırın:
+   ```bash
+   python uyap_asistan.py
+   ```
+
+---
+
+## 📦 Bağımlılıklar (`requirements.txt`)
+
+```text
+customtkinter>=5.2.0
+PyMuPDF>=1.23.0
+Pillow>=10.0.0
+python-docx>=1.0.0
+docx2pdf>=0.1.8
+tkinterdnd2>=0.3.0
+```
+
+> **İpucu (Windows Word Dönüşümü):** Word (.docx) belgelerini PDF'e dönüştürmek için bilgisayarınızda Microsoft Word yüklü olmalıdır.
+
+---
+
+## 🚀 Tek Dosya Halinde Çalıştırılabilir Dosya (EXE) Yapma
+
+Uygulamayı Python yüklü olmayan bilgisayarlarda çalıştırmak için PyInstaller ile derleyebilirsiniz:
+
+```bash
+pip install pyinstaller
+pyinstaller --noconfirm --onedir --windowed --add-data "logo.ico;." uyap_asistan.py
+```
+
+*(Eğer tek dosya `.exe` istiyorsanız `--onedir` yerine `--onefile` kullanabilirsiniz.)*
+
+---
+
+## 🔒 Güvenlik ve Gizlilik
+
+* **Tamamen Yerel:** Belgeler harici bir API'ye veya buluta yüklenmez; tüm kütüphaneler yerel bellek ve disk üzerinde çalışır.
+* **Gerçek Redaksiyon:** KVKK karartması bir görsel katman eklemekle kalmaz; PyMuPDF'in `apply_redactions` ve `scrub` işlevlerini kullanarak veriyi PDF nesne ağacından kalıcı olarak yok eder.
 
 ---
 
 ## 📄 Lisans
 
-Bu proje **GNU General Public License v3.0 (GPL-3.0)** altında lisanslanmıştır. Detaylar için [LICENSE](LICENSE) dosyasına göz atabilirsiniz.
+Bu proje [MIT Lisansı](LICENSE) kapsamında lisanslanmıştır.
