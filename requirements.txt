@@ -1,4 +1,7 @@
-python-docx
+customtkinter==6.0.0
+docx2pdf==0.1.8
 Pillow==12.3.0
 pymupdf==1.28.2
+python_docx==1.2.0
+pywin32==312
 tkinterdnd2==0.6.4
