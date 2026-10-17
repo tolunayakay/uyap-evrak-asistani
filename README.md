@@ -37,7 +37,6 @@
 ### 🔏 4. e-İmza & Zaman Damgası (TSA) Analizi
 * **CAdES / PAdES Taraması:** `.udf` ve `.pdf` formatındaki evraklarda yer alan nitelikli elektronik imzaları ve zaman damgalarını otomatik tespit etme.
 * **Durum Rozetleri:** Dosya listesinde belgelerin yanına anlık durum rozetleri ekleme (`[✓ e-İmzalı]`, `[⏱ Z.Damgalı]`).
-* **Detay Raporlama:** İmzalayan kişi/avukat/hâkim bilgisi, imza tarihi, doğrulama durumu ve resmi TSA sertifika ayrıntılarını özel analiz penceresinde raporlama.
 
 ### 🛡️ 5. Hukuki Güvenlik & KVKK Modülü
 * **"Aslı Gibidir" Dijital Kaşesi:** Belgenin yönüne duyarlı olarak sağ/sol/orta alt veya üst köşelere avukat sicil, isim ve tarih bilgisiyle dijital kaşe uygulama.
