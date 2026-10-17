@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import io
 import re
@@ -11,12 +12,14 @@ import webbrowser
 import xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw, ImageFilter
 import docx
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 from docx.table import Table
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 import pymupdf  # PyMuPDF
 import customtkinter as ctk
 
@@ -47,7 +50,6 @@ except ImportError:
 # GİZLİ AYAR YÖNETİCİSİ (APPDATA / CONFIG DİZİNİNDE SAKLAR)
 # ============================================================================
 def get_ayar_dosya_yolu() -> str:
-    """Kullanıcının dosya dizininde görünmemesi için AppData / Config altına gizler."""
     if os.name == 'nt':
         taban_dizin = os.environ.get('APPDATA', os.path.expanduser('~'))
         klasor = os.path.join(taban_dizin, 'UyapAsistani')
@@ -92,7 +94,6 @@ def ayar_kaydet(anahtar: str, deger):
         pass
 
 
-# Başlangıçta kayıtlı temayı yükle
 _BASLANGIC_AYARLARI = ayarlari_yukle()
 ctk.set_appearance_mode(_BASLANGIC_AYARLARI.get("tema", "Light"))
 ctk.set_default_color_theme("blue")
@@ -263,7 +264,7 @@ def eimza_bilgisi_al(dosya_yolu: str) -> dict:
 
 
 # ============================================================================
-# WORD -> UDF MOTORU (XML, RESİM VE TABLO AYRIŞTIRICILARI)
+# GELİŞMİŞ UDF MOTORU (WORD & PDF -> UDF VE WORD DÖNÜŞTÜRÜCÜSÜ)
 # ============================================================================
 _XML_GECERSIZ = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 _NS_A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
@@ -644,6 +645,586 @@ def docx_to_udf_cevir(kaynak_docx_yol, max_px=510):
 
 
 # ============================================================================
+# PDF -> UDF & PDF -> WORD MOTORU (TOPLULUK KATKISI ANALİZ MOTORU)
+# ============================================================================
+def _alan(k):
+    return max(0.0, k[2] - k[0]) * max(0.0, k[3] - k[1])
+
+
+def _bolge_birlestir(bolgeler):
+    bolgeler = [list(b) for b in bolgeler]
+    degisti = True
+    while degisti:
+        degisti = False
+        for i in range(len(bolgeler)):
+            for j in range(i + 1, len(bolgeler)):
+                a, b = bolgeler[i], bolgeler[j]
+                if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
+                    bolgeler[i] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+                    del bolgeler[j]
+                    degisti = True
+                    break
+            if degisti:
+                break
+    return [tuple(b) for b in bolgeler]
+
+
+def _sekil_bolgeleri(sayfa, gen, yuk, metin_kutulari):
+    DPI = 36
+    pix = sayfa.get_pixmap(dpi=DPI)
+    im = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
+    sx = im.width / gen
+    sy = im.height / yuk
+    cizim = ImageDraw.Draw(im)
+    for x0, y0, x1, y1 in metin_kutulari:
+        cizim.rectangle([x0 * sx - 2, y0 * sy - 2, x1 * sx + 2, y1 * sy + 2], fill=255)
+    maske = im.point(lambda v: 255 if v < 225 else 0).filter(ImageFilter.MaxFilter(7))
+    w, h = maske.size
+    px = maske.load()
+    gorulen = [[False] * w for _ in range(h)]
+    bulunan = []
+    for y in range(h):
+        for x in range(w):
+            if px[x, y] and not gorulen[y][x]:
+                yigin = [(x, y)]
+                gorulen[y][x] = True
+                bx0 = bx1 = x
+                by0 = by1 = y
+                while yigin:
+                    cx, cy = yigin.pop()
+                    bx0 = min(bx0, cx); bx1 = max(bx1, cx)
+                    by0 = min(by0, cy); by1 = max(by1, cy)
+                    for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                        if 0 <= nx < w and 0 <= ny < h and px[nx, ny] and not gorulen[ny][nx]:
+                            gorulen[ny][nx] = True
+                            yigin.append((nx, ny))
+                k = (bx0 / sx, by0 / sy, (bx1 + 1) / sx, (by1 + 1) / sy)
+                bw, bh = k[2] - k[0], k[3] - k[1]
+                if bw >= 30 and bh >= 30 and bw / bh < 8 and bh / bw < 8:
+                    bulunan.append(k)
+    sonuc = []
+    for k in _bolge_birlestir(bulunan):
+        sonuc.append((max(0.0, k[0] - 2), max(0.0, k[1] - 2), min(gen, k[2] + 2), min(yuk, k[3] + 2)))
+    return sonuc
+
+
+def _yazi_ailesi(font_adi):
+    ad = (font_adi or "").lower()
+    if "serif" in ad and "sans" not in ad:
+        return "Times New Roman"
+    if any(k in ad for k in ("sans", "arial", "helvet", "calibri", "verdana", "tahoma", "segoe", "gothic")):
+        return "Arial"
+    return "Times New Roman"
+
+
+def _bloklari_birlestir(bloklar):
+    sirali = sorted(bloklar, key=lambda b: (b["bbox"][1], b["bbox"][0]))
+    sonuc = []
+    for b in sirali:
+        birlesti = False
+        for a in reversed(sonuc[-8:]):
+            ax0, ay0, ax1, ay1 = a["bbox"]
+            bx0, by0, bx1, by1 = b["bbox"]
+            satir_yuk = max(ay1 - ay0, 1.0) / max(len(a["lines"]), 1)
+            bosluk = by0 - ay1
+            ortak = min(ax1, bx1) - max(ax0, bx0)
+            if -1.5 <= bosluk <= 0.6 * satir_yuk and ortak > 0.5 * min(ax1 - ax0, bx1 - bx0) and abs(ax0 - bx0) <= 20:
+                a["lines"] = a["lines"] + b["lines"]
+                a["bbox"] = (min(ax0, bx0), ay0, max(ax1, bx1), max(ay1, by1))
+                birlesti = True
+                break
+        if not birlesti:
+            sonuc.append({"type": 0, "bbox": tuple(b["bbox"]), "lines": list(b["lines"])})
+    return sonuc
+
+
+def _okuma_sirasi(ogeler, gen):
+    orta = gen / 2.0
+
+    def yayilir(o):
+        return o["bbox"][0] < orta - 6 and o["bbox"][2] > orta + 6
+
+    def anahtar(o):
+        return (o["bbox"][1], o["bbox"][0])
+
+    def kosu_coz(kosu):
+        sol = [o for o in kosu if (o["bbox"][0] + o["bbox"][2]) / 2 < orta]
+        sag = [o for o in kosu if (o["bbox"][0] + o["bbox"][2]) / 2 >= orta]
+        gercek_sutun = (sol and sag
+                        and max(o["bbox"][2] - o["bbox"][0] for o in sol) >= 0.25 * gen
+                        and max(o["bbox"][2] - o["bbox"][0] for o in sag) >= 0.25 * gen)
+        if not gercek_sutun:
+            return sorted(kosu, key=anahtar)
+        sol_ust = min(o["bbox"][1] for o in sol)
+        sag_ust = min(o["bbox"][1] for o in sag)
+        ust = [o for o in sag if o["bbox"][3] <= sol_ust + 1] + [o for o in sol if o["bbox"][3] <= sag_ust + 1]
+        sol_kalan = [o for o in sol if o not in ust]
+        sag_kalan = [o for o in sag if o not in ust]
+        return sorted(ust, key=anahtar) + sorted(sol_kalan, key=anahtar) + sorted(sag_kalan, key=anahtar)
+
+    sonuc, kosu = [], []
+    for o in sorted(ogeler, key=anahtar):
+        if yayilir(o):
+            sonuc.extend(kosu_coz(kosu))
+            kosu = []
+            sonuc.append(o)
+        else:
+            kosu.append(o)
+    sonuc.extend(kosu_coz(kosu))
+    return sonuc
+
+
+def _liste_gecisi(mevcut, sonraki_satir):
+    if not mevcut:
+        return False
+    son = mevcut[-1][1].rstrip()
+    ilk = ""
+    for sp in sonraki_satir.get("spans", []):
+        if sp.get("text", "").strip():
+            ilk = sp["text"].lstrip()[:1]
+            break
+    if not son or not ilk or son[-1] in ".,;:-–—":
+        return False
+    return ilk.isupper() or ilk.isdigit() or ilk in "(“\"•"
+
+
+def _pdf_tablolari(sayfa, govde, azami_gen=510.0):
+    try:
+        bulunan = sayfa.find_tables(vertical_strategy="lines_strict", horizontal_strategy="lines_strict").tables
+        satir_listesi = []
+        for b in sayfa.get_text("dict").get("blocks", []):
+            if b.get("type") == 0:
+                for ln in b.get("lines", []):
+                    if any(sp.get("text", "").strip() for sp in ln.get("spans", [])):
+                        satir_listesi.append(ln["bbox"])
+    except Exception:
+        return []
+
+    def kume(degerler, tol=2.0):
+        kenarlar = []
+        for v in sorted(degerler):
+            if kenarlar and v - kenarlar[-1] <= tol:
+                continue
+            kenarlar.append(v)
+        return kenarlar
+
+    def indeks(kenarlar, v, tol=2.0):
+        return min(range(len(kenarlar)), key=lambda i: abs(kenarlar[i] - v))
+
+    sonuc = []
+    for t in bulunan:
+        hucreler = [tuple(c) for c in (t.cells or []) if c]
+        if len(hucreler) < 2:
+            continue
+        xk = kume([c[0] for c in hucreler] + [c[2] for c in hucreler])
+        yk = kume([c[1] for c in hucreler] + [c[3] for c in hucreler])
+        if len(xk) < 3:
+            continue
+        tx0, ty0, tx1, ty1 = min(xk), min(yk), max(xk), max(yk)
+        icerde = [l for l in satir_listesi if tx0 - 1 <= (l[0] + l[2]) / 2 <= tx1 + 1 and ty0 - 1 <= (l[1] + l[3]) / 2 <= ty1 + 1]
+        if not icerde:
+            continue
+        uymayan = 0
+        for l in icerde:
+            if not any(c[0] - 3 <= l[0] and l[2] <= c[2] + 3 and c[1] - 3 <= l[1] and l[3] <= c[3] + 3 for c in hucreler):
+                uymayan += 1
+        if uymayan > 0.15 * len(icerde):
+            continue
+        nsat, nsut = len(yk) - 1, len(xk) - 1
+        yerlesim = {}
+        kapli = [[False] * nsut for _ in range(nsat)]
+        for c in hucreler:
+            c0, c1 = indeks(xk, c[0]), indeks(xk, c[2])
+            r0, r1 = indeks(yk, c[1]), indeks(yk, c[3])
+            if c1 <= c0 or r1 <= r0 or kapli[r0][c0]:
+                continue
+            yerlesim[(r0, c0)] = (c, c1 - c0, r1 - r0)
+            for r in range(r0, r1):
+                for k in range(c0, c1):
+                    kapli[r][k] = True
+
+        def hucre_icerigi(rect, gen_h):
+            r = pymupdf.Rect(*rect)
+            r = pymupdf.Rect(r.x0 + 1, r.y0 + 1, r.x1 - 1, r.y1 - 1)
+            try:
+                sozluk = sayfa.get_text("dict", clip=r)
+            except Exception:
+                return []
+            satirlar = []
+            for b in sozluk.get("blocks", []):
+                if b.get("type") != 0:
+                    continue
+                for ln in b.get("lines", []):
+                    if any(sp.get("text", "").strip() for sp in ln.get("spans", [])):
+                        satirlar.append(ln)
+            satirlar.sort(key=lambda l: (round(l["bbox"][1] / 3.0), l["bbox"][0]))
+            gruplar = []
+            for ln in satirlar:
+                if gruplar and abs(gruplar[-1][-1]["bbox"][1] - ln["bbox"][1]) < 2.5:
+                    gruplar[-1].append(ln)
+                else:
+                    gruplar.append([ln])
+            paragraflar, mevcut, onceki = [], [], None
+
+            def bitir():
+                if not mevcut:
+                    return
+                ogeler = list(mevcut)
+                ogeler[0] = ("metin", ogeler[0][1].lstrip(), ogeler[0][2])
+                ogeler[-1] = ("metin", ogeler[-1][1].rstrip(), ogeler[-1][2])
+                x0 = min(l["bbox"][0] for g in mevcut_satirlar for l in g)
+                x1 = max(l["bbox"][2] for g in mevcut_satirlar for l in g)
+                orta = ((x0 + x1) / 2 - rect[0]) / max(gen_h, 1.0)
+                hiza = 1 if abs(orta - 0.5) < 0.12 and (x0 - rect[0]) > 3 else 0
+                if any(o[1].strip() for o in ogeler):
+                    paragraflar.append((hiza, ogeler))
+                del mevcut[:]
+                del mevcut_satirlar[:]
+
+            mevcut_satirlar = []
+            for g in gruplar:
+                y0 = min(l["bbox"][1] for l in g)
+                y1 = max(l["bbox"][3] for l in g)
+                if onceki is not None and mevcut and (y0 - onceki[1]) > 1.2 * max(onceki[1] - onceki[0], 6.0):
+                    bitir()
+                if mevcut:
+                    mevcut.append(("metin", " ", mevcut[-1][2]))
+                mevcut_satirlar.append(g)
+                for ln in sorted(g, key=lambda l: l["bbox"][0]):
+                    for sp in ln["spans"]:
+                        metin = sp.get("text", "").replace("\u00ad", "")
+                        if not metin:
+                            continue
+                        boyut = float(sp.get("size", 12))
+                        ad = sp.get("font", "").lower()
+                        bayrak = sp.get("flags", 0)
+                        bicim = {
+                            "bold": bool(bayrak & 16) or "bold" in ad,
+                            "italic": bool(bayrak & 2) or "italic" in ad or "oblique" in ad,
+                            "underline": False,
+                            "size": max(6, min(int(round(boyut)), 72)),
+                            "family": _yazi_ailesi(sp.get("font", "")),
+                        }
+                        if mevcut and mevcut[-1][2] == bicim:
+                            mevcut[-1] = ("metin", mevcut[-1][1] + metin, bicim)
+                        else:
+                            mevcut.append(("metin", metin, bicim))
+                onceki = (y0, y1)
+            bitir()
+            return paragraflar
+
+        genislikler = [xk[i + 1] - xk[i] for i in range(nsut)]
+        toplam = sum(genislikler)
+        olcek = azami_gen / toplam if toplam > azami_gen else 1.0
+        genislikler = [g * olcek for g in genislikler]
+
+        satirlar = []
+        for r in range(nsat):
+            satir = []
+            for k in range(nsut):
+                if (r, k) in yerlesim:
+                    rect, cs, rs = yerlesim[(r, k)]
+                    satir.append({"paragraflar": hucre_icerigi(rect, rect[2] - rect[0]),
+                                  "colspan": cs, "rowspan": rs})
+                elif not kapli[r][k]:
+                    satir.append({"paragraflar": [], "colspan": 1, "rowspan": 1})
+            satirlar.append(satir)
+        sonuc.append({"bbox": (xk[0], yk[0], xk[-1], yk[-1]), "satirlar": satirlar, "genislikler": genislikler})
+    return sonuc
+
+
+def _pdf_blok_paragraflari(blok, gen, govde_punto):
+    satirlar = [s for s in blok.get("lines", []) if any(sp.get("text", "").strip() for sp in s.get("spans", []))]
+    if not satirlar:
+        return []
+    sol = min(s["bbox"][0] for s in satirlar)
+    sag = max(s["bbox"][2] for s in satirlar)
+    blok_gen = max(sag - sol, 1.0)
+
+    yasli = False
+    if len(satirlar) >= 3:
+        dayanan = sum(1 for s in satirlar[:-1] if s["bbox"][2] >= sag - 2.5)
+        yasli = dayanan >= 0.7 * (len(satirlar) - 1) and blok_gen > 0.25 * gen
+
+    paragraflar = []
+    mevcut = []
+    p_satirlari = []
+
+    def bitir():
+        if not mevcut:
+            return
+        x0 = min(s["bbox"][0] for s in p_satirlari)
+        x1 = max(s["bbox"][2] for s in p_satirlari)
+        y0 = p_satirlari[0]["bbox"][1]
+        y1 = p_satirlari[-1]["bbox"][3]
+        hiza = 0
+        if yasli:
+            hiza = 3
+        elif len(p_satirlari) <= 3:
+            merkez = (x0 + x1) / 2
+            if abs(merkez - gen / 2) < 10 and (x1 - x0) < 0.85 * gen and x0 > 30:
+                hiza = 1
+            elif len(p_satirlari) == 1 and x1 >= gen - 100 and x0 > 0.55 * gen:
+                hiza = 2
+        ogeler = list(mevcut)
+        if ogeler:
+            ogeler[0] = ("metin", ogeler[0][1].lstrip(), ogeler[0][2])
+            ogeler[-1] = ("metin", ogeler[-1][1].rstrip(), ogeler[-1][2])
+        if any(o[1].strip() for o in ogeler):
+            paragraflar.append((hiza, ogeler, y0, y1))
+        del mevcut[:]
+        del p_satirlari[:]
+
+    for i, satir in enumerate(satirlar):
+        if mevcut:
+            son = mevcut[-1]
+            ilk = ""
+            for sp in satir["spans"]:
+                if sp.get("text", "").strip():
+                    ilk = sp["text"].lstrip()[:1]
+                    break
+            if son[1].endswith("-") and len(son[1]) > 1 and son[1][-2].isalnum() and ilk.islower():
+                mevcut[-1] = ("metin", son[1][:-1], son[2])
+            else:
+                mevcut.append(("metin", " ", son[2]))
+        p_satirlari.append(satir)
+        for sp in satir["spans"]:
+            metin = sp.get("text", "").replace("\u00ad", "")
+            if not metin:
+                continue
+            boyut = float(sp.get("size", 12))
+            ad = sp.get("font", "").lower()
+            bayrak = sp.get("flags", 0)
+            baslik = boyut >= max(13.0, 1.35 * govde_punto)
+            bicim = {
+                "bold": bool(bayrak & 16) or "bold" in ad or baslik,
+                "italic": bool(bayrak & 2) or "italic" in ad or "oblique" in ad,
+                "underline": False,
+                "size": max(6, min(int(round(boyut)), 72)),
+                "family": _yazi_ailesi(sp.get("font", "")),
+            }
+            if mevcut and mevcut[-1][2] == bicim:
+                mevcut[-1] = ("metin", mevcut[-1][1] + metin, bicim)
+            else:
+                mevcut.append(("metin", metin, bicim))
+        if i + 1 < len(satirlar):
+            sonraki = satirlar[i + 1]
+            tam_satir = satir["bbox"][2] >= sag - 0.20 * blok_gen
+            girinti = sonraki["bbox"][0] > satir["bbox"][0] + 6
+            if not tam_satir or girinti or (not yasli and _liste_gecisi(mevcut, sonraki)):
+                bitir()
+    bitir()
+    return paragraflar
+
+
+def _govde_punto(metin_bloklari):
+    agirlik = {}
+    for b in metin_bloklari:
+        for s in b.get("lines", []):
+            for sp in s.get("spans", []):
+                n = len(sp.get("text", "").strip())
+                if n:
+                    k = round(float(sp.get("size", 12)))
+                    agirlik[k] = agirlik.get(k, 0) + n
+    if sum(agirlik.values()) < 30:
+        return 10.0
+    return float(max(agirlik, key=agirlik.get))
+
+
+def pdf_den_udf(yol, belge, max_px, sayfa_resmi, resimler, sayfa_sinirlari=None, tablo_destegi=True):
+    ist = {"resim": 0, "atlanan": 0}
+    doc = pymupdf.open(yol)
+    try:
+        for sayfa in doc:
+            gen = float(sayfa.rect.width)
+            yuk = float(sayfa.rect.height)
+            if sayfa_sinirlari is not None:
+                sayfa_sinirlari.append(len(belge.paragraflar))
+            ist.setdefault("sayfa_gen", gen)
+            ist.setdefault("sayfa_yuk", yuk)
+            if sayfa_resmi:
+                pix = sayfa.get_pixmap(dpi=150)
+                oge = _resim_ogesi_udf(pix.tobytes("png"), max_px, max_px, resimler, ist, jpeg_zorla=True)
+                if oge:
+                    belge.paragraf_ekle([oge], 1)
+                continue
+
+            bloklar = sayfa.get_text("dict").get("blocks", [])
+            metin_bloklari = [b for b in bloklar if b.get("type") == 0 and any(sp.get("text", "").strip() for s in b.get("lines", []) for sp in s.get("spans", []))]
+            resim_bloklari = [b for b in bloklar if b.get("type") == 1]
+            govde = _govde_punto(metin_bloklari)
+
+            ogeler = []
+            arka_plan = any(_alan(b["bbox"]) >= 0.8 * gen * yuk for b in resim_bloklari)
+
+            if arka_plan:
+                kutular = [b["bbox"] for b in metin_bloklari]
+                bolgeler = _sekil_bolgeleri(sayfa, gen, yuk, kutular)
+                if not metin_bloklari or (bolgeler and max(_alan(k) for k in bolgeler) >= 0.7 * gen * yuk):
+                    pix = sayfa.get_pixmap(dpi=150)
+                    oge = _resim_ogesi_udf(pix.tobytes("png"), max_px, max_px, resimler, ist, jpeg_zorla=True)
+                    if oge:
+                        belge.paragraf_ekle([oge], 1)
+                    continue
+                for k in bolgeler:
+                    try:
+                        pix = sayfa.get_pixmap(dpi=150, clip=pymupdf.Rect(*k))
+                        oge = _resim_ogesi_udf(pix.tobytes("png"), k[2] - k[0], max_px, resimler, ist, jpeg_zorla=True)
+                    except Exception:
+                        oge = None
+                        ist["atlanan"] += 1
+                    if oge:
+                        ogeler.append({"tur": "resim", "bbox": k, "oge": oge})
+
+                def sekil_icinde(b):
+                    bx0, by0, bx1, by1 = b["bbox"]
+                    alan_b = max(_alan(b["bbox"]), 1e-6)
+                    for k in bolgeler:
+                        kx = max(0.0, min(bx1, k[2]) - max(bx0, k[0]))
+                        ky = max(0.0, min(by1, k[3]) - max(by0, k[1]))
+                        if kx * ky >= 0.7 * alan_b:
+                            return True
+                    return False
+                metin_bloklari = [b for b in metin_bloklari if not sekil_icinde(b)]
+            else:
+                for b in resim_bloklari:
+                    if b.get("width", 0) < 10 or b.get("height", 0) < 10:
+                        continue
+                    x0, y0, x1, y1 = b["bbox"]
+                    oge = _resim_ogesi_udf(b["image"], x1 - x0, max_px, resimler, ist)
+                    if oge:
+                        ogeler.append({"tur": "resim", "bbox": b["bbox"], "oge": oge})
+
+            if not arka_plan and tablo_destegi:
+                tablolar = _pdf_tablolari(sayfa, govde, max_px if max_px >= 510 else 510.0)
+                if tablolar:
+                    def satir_tabloda(ln):
+                        x0, y0, x1, y1 = ln["bbox"]
+                        mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+                        for tb in tablolar:
+                            k = tb["bbox"]
+                            if k[0] - 1 <= mx <= k[2] + 1 and k[1] - 1 <= my <= k[3] + 1:
+                                return True
+                        return False
+                    yeni = []
+                    for blk in metin_bloklari:
+                        kalan = [ln for ln in blk.get("lines", []) if not satir_tabloda(ln)]
+                        if not kalan:
+                            continue
+                        if len(kalan) != len(blk.get("lines", [])):
+                            blk = {"type": 0, "lines": kalan,
+                                   "bbox": (min(l["bbox"][0] for l in kalan), min(l["bbox"][1] for l in kalan),
+                                            max(l["bbox"][2] for l in kalan), max(l["bbox"][3] for l in kalan))}
+                        yeni.append(blk)
+                    metin_bloklari = yeni
+                    for tb in tablolar:
+                        ogeler.append({"tur": "tablo", "bbox": tb["bbox"], "tablo": tb})
+
+            metin_bloklari = _bloklari_birlestir(metin_bloklari)
+            for b in metin_bloklari:
+                ogeler.append({"tur": "metin", "bbox": b["bbox"], "blok": b})
+
+            onceki_y1 = None
+            onceki_yuk = None
+            icerik_var = False
+            for o in _okuma_sirasi(ogeler, gen):
+                x0, y0, x1, y1 = o["bbox"]
+                if o["tur"] == "tablo":
+                    if onceki_y1 is not None and (y0 - onceki_y1) > 8:
+                        belge.paragraf_ekle([], 0)
+                    belge.tablo_ekle(o["tablo"]["satirlar"], o["tablo"]["genislikler"])
+                    onceki_y1, onceki_yuk = y1, None
+                    icerik_var = True
+                    continue
+                if o["tur"] == "resim":
+                    merkez = (x0 + x1) / 2
+                    if (x1 - x0) >= 0.6 * gen or abs(merkez - gen / 2) < 0.1 * gen:
+                        hiza = 1
+                    elif merkez < 0.4 * gen:
+                        hiza = 0
+                    else:
+                        hiza = 2
+                    belge.paragraf_ekle([o["oge"]], hiza)
+                    onceki_y1, onceki_yuk = y1, None
+                    icerik_var = True
+                    continue
+                paragraflar = _pdf_blok_paragraflari(o["blok"], gen, govde)
+                for n, (hiza, og, py0, py1) in enumerate(paragraflar):
+                    if onceki_y1 is not None and py0 > onceki_y1:
+                        ref = onceki_yuk or (py1 - py0)
+                        if (py0 - onceki_y1) > 1.4 * ref:
+                            belge.paragraf_ekle([], 0)
+                    belge.paragraf_ekle(og, hiza)
+                    onceki_y1 = py1
+                    onceki_yuk = max(py1 - py0, 8.0)
+                    icerik_var = True
+            if icerik_var:
+                belge.paragraf_ekle([], 0)
+    finally:
+        doc.close()
+    ist["paragraf"] = len(belge.paragraflar)
+    return ist
+
+
+def belge_docx_yaz(belge, yol, sayfa_gen=595.0, sayfa_yuk=842.0, sayfa_sinirlari=None, kenar=42.5):
+    d = docx.Document()
+    bolum = d.sections[0]
+    bolum.page_width = Pt(sayfa_gen)
+    bolum.page_height = Pt(sayfa_yuk)
+    for ad in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
+        setattr(bolum, ad, Pt(kenar))
+    normal = d.styles["Normal"]
+    normal.font.name = UdfBelge.YAZI_TIPI
+    normal.font.size = Pt(12)
+    normal.paragraph_format.space_before = Pt(0)
+    normal.paragraph_format.space_after = Pt(3)
+    normal.paragraph_format.line_spacing = 1.0
+    yazdirilabilir = sayfa_gen - 2 * kenar
+    hizalar = {0: WD_ALIGN_PARAGRAPH.LEFT, 1: WD_ALIGN_PARAGRAPH.CENTER,
+               2: WD_ALIGN_PARAGRAPH.RIGHT, 3: WD_ALIGN_PARAGRAPH.JUSTIFY}
+    sinirlar = set(i for i in (sayfa_sinirlari or []) if i > 0)
+    for i, (hiza, ogeler) in enumerate(o for o in belge.paragraflar if o[0] != "TABLO"):
+        if (i + 1) in sinirlar and not ogeler:
+            continue
+        p = d.add_paragraph()
+        if i in sinirlar:
+            p.paragraph_format.page_break_before = True
+        p.alignment = hizalar.get(hiza, WD_ALIGN_PARAGRAPH.LEFT)
+        for o in ogeler:
+            if o[0] == "metin":
+                metin = _XML_GECERSIZ.sub("", o[1])
+                if not metin:
+                    continue
+                r = p.add_run(metin)
+                b = o[2] or {}
+                r.bold = bool(b.get("bold"))
+                r.italic = bool(b.get("italic"))
+                r.underline = bool(b.get("underline"))
+                r.font.name = b.get("family") or UdfBelge.YAZI_TIPI
+                r.font.size = Pt(b.get("size") or 12)
+            else:
+                gen = min(float(o[2]), yazdirilabilir)
+                p.add_run().add_picture(io.BytesIO(base64.b64decode(o[1])), width=Pt(gen))
+    d.save(yol)
+
+
+def pdf_den_docx(yol, hedef, sayfa_resmi=False, sayfa_sonlari=True):
+    ac = pymupdf.open(yol)
+    try:
+        r = ac[0].rect
+        sayfa_gen, sayfa_yuk = float(r.width), float(r.height)
+    finally:
+        ac.close()
+    kenar = 42.5
+    belge = UdfBelge()
+    resimler = []
+    sinirlar = []
+    ist = pdf_den_udf(yol, belge, sayfa_gen - 2 * kenar, sayfa_resmi, resimler, sinirlar, tablo_destegi=False)
+    belge_docx_yaz(belge, hedef, sayfa_gen, sayfa_yuk, sinirlar if sayfa_sonlari else None, kenar)
+    return ist
+
+
+# ============================================================================
 # GÖRSEL SAYFA ÖNİZLEME & DÜZENLEME PENCERESİ (THUMBNAIL GRID)
 # ============================================================================
 class PdfGorselOnizlemePenceresi(ctk.CTkToplevel):
@@ -968,8 +1549,8 @@ class ModernUyapAsistani(CTkDnD):
         self.ayarlar = ayarlari_yukle()
 
         self.title("UYAP Evrak Asistanı")
-        self.geometry("1100x700")
-        self.minsize(1040, 650)
+        self.geometry("1140x720")
+        self.minsize(1060, 660)
         self.configure(fg_color=("#F8FAFC", "#0F172A"))
 
         self.dosyalar = []
@@ -1019,11 +1600,9 @@ class ModernUyapAsistani(CTkDnD):
             pady=2
         ).pack(side="left", padx=10)
 
-        # Sağ üst aksiyon butonları: Tema Switch + Hakkında + Nasıl Kullanılır?
         sag_aksiyon_frame = ctk.CTkFrame(header, fg_color="transparent")
         sag_aksiyon_frame.pack(side="right", padx=24)
 
-        # Tema Switch Başlangıç Durumu
         mevcut_tema = self.ayarlar.get("tema", "Light")
         self.tema_switch = ctk.CTkSwitch(
             sag_aksiyon_frame,
@@ -1216,7 +1795,7 @@ class ModernUyapAsistani(CTkDnD):
         sag_kart = ctk.CTkFrame(
             govde,
             fg_color=("#FFFFFF", "#1E293B"),
-            width=470,
+            width=480,
             corner_radius=12,
             border_width=1,
             border_color=("#E2E8F0", "#334155")
@@ -1444,41 +2023,48 @@ class ModernUyapAsistani(CTkDnD):
         ).pack(fill="x", pady=4)
 
     # ========================================================
-    # SEKME 3: DÖNÜŞTÜR
+    # SEKME 3: DÖNÜŞTÜR (YENİ MODÜLLER EKLENDİ)
     # ========================================================
     def _sekme_donusturucu_olustur(self):
         tab = self.tab_donusturucu
 
-        ctk.CTkLabel(tab, text="FORMAT DÖNÜŞÜMLERİ", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 6))
-
-        bilgi_kutusu = ctk.CTkFrame(
-            tab,
-            fg_color=("#F8FAFC", "#0F172A"),
-            corner_radius=8,
-            border_width=1,
-            border_color=("#E2E8F0", "#334155")
-        )
-        bilgi_kutusu.pack(fill="x", pady=(0, 10))
-
-        ctk.CTkLabel(
-            bilgi_kutusu,
-            text="💡 Dönüştürmek istediğiniz dosyayı sol listeden seçin\nveya doğrudan ilgili butona basıp dosya seçin.",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color=("#64748B", "#94A3B8"),
-            justify="left"
-        ).pack(anchor="w", padx=12, pady=8)
+        ctk.CTkLabel(tab, text="UYAP VE OFİS DÖNÜŞÜMLERİ", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 4))
 
         ctk.CTkButton(
             tab,
-            text="📄 UDF ➔ Word (.docx)",
+            text="📋 PDF ➔ UDF (.udf) (Şablon Editörüne Aktar)",
+            command=self.pdf_to_udf_dialog,
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(fill="x", pady=3)
+
+        ctk.CTkButton(
+            tab,
+            text="📝 PDF ➔ Word (.docx)",
+            command=self.pdf_to_docx_dialog,
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(fill="x", pady=3)
+
+        ctk.CTkButton(
+            tab,
+            text="📄 UDF (.udf) ➔ Word (.docx)",
             command=lambda: self._thread_calistir(self.udf_to_word),
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            height=38,
+            height=36,
             corner_radius=8
-        ).pack(fill="x", pady=4)
+        ).pack(fill="x", pady=3)
 
         ctk.CTkButton(
             tab,
@@ -1488,9 +2074,9 @@ class ModernUyapAsistani(CTkDnD):
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            height=38,
+            height=36,
             corner_radius=8
-        ).pack(fill="x", pady=4)
+        ).pack(fill="x", pady=3)
 
         ctk.CTkButton(
             tab,
@@ -1500,9 +2086,9 @@ class ModernUyapAsistani(CTkDnD):
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            height=38,
+            height=36,
             corner_radius=8
-        ).pack(fill="x", pady=4)
+        ).pack(fill="x", pady=3)
 
         ctk.CTkButton(
             tab,
@@ -1512,9 +2098,9 @@ class ModernUyapAsistani(CTkDnD):
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            height=36,
+            height=34,
             corner_radius=8
-        ).pack(fill="x", pady=4)
+        ).pack(fill="x", pady=(6, 3))
 
     # ========================================================
     # SEKME 4: KVKK & KAŞE
@@ -2204,8 +2790,141 @@ class ModernUyapAsistani(CTkDnD):
             messagebox.showerror("Hata", f"İşlem hatası:\n{str(e)}")
 
     # ========================================================
-    # 3. DÖNÜŞTÜR İŞLEMLERİ
+    # 3. DÖNÜŞTÜR İŞLEMLERİ (PDF ➔ UDF & PDF ➔ WORD DAHİL)
     # ========================================================
+    def pdf_to_udf_dialog(self):
+        kaynak_yol = None
+        if hasattr(self, "secili_dosya_indeksi") and self.secili_dosya_indeksi is not None and self.dosyalar:
+            aday = self.dosyalar[self.secili_dosya_indeksi]
+            if aday.lower().endswith('.pdf'):
+                kaynak_yol = aday
+
+        if not kaynak_yol:
+            kaynak_yol = filedialog.askopenfilename(
+                title="Dönüştürülecek PDF Dosyasını Seçin",
+                filetypes=[("PDF Dosyaları", "*.pdf")]
+            )
+
+        if not kaynak_yol:
+            return
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("PDF ➔ UDF Dönüştürücü")
+        dialog.geometry("450x330")
+        dialog.resizable(False, False)
+        dialog.after(100, dialog.lift)
+
+        ctk.CTkLabel(dialog, text="📋 UYAP Şablon Editörüne Aktarma", font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold")).pack(pady=(16, 4))
+        ctk.CTkLabel(dialog, text=os.path.basename(kaynak_yol), font=ctk.CTkFont(family="Segoe UI", size=11), text_color=("#64748B", "#94A3B8")).pack(pady=(0, 10))
+
+        mod_var = ctk.StringVar(value="metin")
+        ctk.CTkRadioButton(dialog, text="Metin + Resimler (Düzenlenebilir Metin - Önerilen)", variable=mod_var, value="metin").pack(anchor="w", padx=24, pady=3)
+        ctk.CTkRadioButton(dialog, text="Her Sayfayı Resim Olarak Ekle (Taranmış Evrak Modu)", variable=mod_var, value="sayfa").pack(anchor="w", padx=24, pady=3)
+
+        yedek_resim_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(dialog, text="Resimleri yedek olarak ayrıca klasöre kaydet", variable=yedek_resim_var).pack(anchor="w", padx=24, pady=(10, 4))
+
+        oto_ac_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(dialog, text="Oluşturulunca dosyayı UYAP Editörde aç", variable=oto_ac_var).pack(anchor="w", padx=24, pady=4)
+
+        def baslat():
+            hedef_yol = filedialog.asksaveasfilename(
+                defaultextension=".udf",
+                filetypes=[("UYAP Dokümanı", "*.udf")],
+                title="UDF Olarak Kaydet",
+                initialfile=os.path.splitext(os.path.basename(kaynak_yol))[0] + ".udf"
+            )
+            if not hedef_yol:
+                return
+
+            dialog.destroy()
+
+            def gorev():
+                self.durum_etiketi.configure(text="PDF, UDF formatına dönüştürülüyor...")
+                try:
+                    belge = UdfBelge()
+                    resimler = []
+                    ist = pdf_den_udf(kaynak_yol, belge, max_px=510, sayfa_resmi=(mod_var.get() == "sayfa"), resimler=resimler)
+                    belge.kaydet(hedef_yol)
+
+                    klasor_notu = ""
+                    if yedek_resim_var.get() and resimler:
+                        klasor = os.path.splitext(hedef_yol)[0] + "_resimler"
+                        os.makedirs(klasor, exist_ok=True)
+                        for n, (veri, uz) in enumerate(resimler, 1):
+                            with open(os.path.join(klasor, f"resim_{n:03d}.{uz}"), "wb") as f:
+                                f.write(veri)
+                        klasor_notu = f"\n\nYedek görseller klasöre çıkarıldı:\n{klasor}"
+
+                    self.durum_etiketi.configure(text=f"PDF ➔ UDF tamamlandı: {ist['paragraf']} paragraf, {ist['resim']} resim.")
+                    mesaj = f"PDF başarıyla UDF biçimine dönüştürüldü!\n\nAktarılan Paragraf: {ist['paragraf']}\nAktarılan Resim: {ist['resim']}\nDosya: {os.path.basename(hedef_yol)}{klasor_notu}"
+                    if ist.get("atlanan", 0) > 0:
+                        mesaj += f"\n\nNot: {ist['atlanan']} adet vektörel görsel editörden elle eklenmelidir."
+
+                    messagebox.showinfo("Başarılı", mesaj)
+
+                    if oto_ac_var.get():
+                        try:
+                            os.startfile(hedef_yol)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    messagebox.showerror("Hata", f"PDF ➔ UDF dönüştürme hatası:\n{str(e)}")
+
+            self._thread_calistir(gorev)
+
+        ctk.CTkButton(
+            dialog,
+            text="📋 UDF'e Dönüştür ve Kaydet",
+            command=baslat,
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(pady=(16, 0), padx=24, fill="x")
+
+    def pdf_to_docx_dialog(self):
+        kaynak_yol = None
+        if hasattr(self, "secili_dosya_indeksi") and self.secili_dosya_indeksi is not None and self.dosyalar:
+            aday = self.dosyalar[self.secili_dosya_indeksi]
+            if aday.lower().endswith('.pdf'):
+                kaynak_yol = aday
+
+        if not kaynak_yol:
+            kaynak_yol = filedialog.askopenfilename(
+                title="Word'e Dönüştürülecek PDF Seçin",
+                filetypes=[("PDF Dosyaları", "*.pdf")]
+            )
+
+        if not kaynak_yol:
+            return
+
+        hedef_yol = filedialog.asksaveasfilename(
+            defaultextension=".docx",
+            filetypes=[("Word Belgesi", "*.docx")],
+            title="Word (.docx) Olarak Kaydet",
+            initialfile=os.path.splitext(os.path.basename(kaynak_yol))[0] + ".docx"
+        )
+        if not hedef_yol:
+            return
+
+        def gorev():
+            self.durum_etiketi.configure(text="PDF Word belgesine aktarılıyor...")
+            try:
+                ist = pdf_den_docx(kaynak_yol, hedef_yol, sayfa_resmi=False, sayfa_sonlari=True)
+                self.durum_etiketi.configure(text=f"PDF ➔ Word tamamlandı: {ist['paragraf']} paragraf.")
+                messagebox.showinfo("Başarılı", f"PDF başarıyla Word formatına dönüştürüldü!\n\nAktarılan Paragraf: {ist['paragraf']}\nAktarılan Görsel: {ist['resim']}\nDosya: {os.path.basename(hedef_yol)}")
+                try:
+                    os.startfile(hedef_yol)
+                except Exception:
+                    pass
+            except Exception as e:
+                messagebox.showerror("Hata", f"PDF ➔ Word dönüştürme hatası:\n{str(e)}")
+
+        self._thread_calistir(gorev)
+
     def udf_to_word(self):
         kaynak_yol = None
         if hasattr(self, "secili_dosya_indeksi") and self.secili_dosya_indeksi is not None and self.dosyalar:
@@ -2534,7 +3253,6 @@ class ModernUyapAsistani(CTkDnD):
 
         ctk.CTkLabel(dialog, text="Avukat İsim / Sicil No / Unvan:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
         avukat_entry = ctk.CTkEntry(dialog, placeholder_text="Av. Ad Soyad - Baro Sicil No")
-        # HATIRLANAN AVUKAT BİLGİSİNİ DOLDUR
         kayitli_avukat = self.ayarlar.get("avukat_bilgisi", "")
         if kayitli_avukat:
             avukat_entry.insert(0, kayitli_avukat)
@@ -2545,7 +3263,6 @@ class ModernUyapAsistani(CTkDnD):
         ek_entry.insert(0, f"Tarih: {bugun}")
         ek_entry.pack(fill="x", padx=20)
 
-        # HATIRLANAN KONUM BİLGİSİ
         kayitli_konum_gorunum = self.ayarlar.get("kase_konum", "Sağ Alt")
         konum_haritasi = {"Sağ Alt": "sag_alt", "Sol Alt": "sol_alt", "Alt Orta": "alt_orta", "Sağ Üst": "sag_ust"}
         konum_var = ctk.StringVar(value=konum_haritasi.get(kayitli_konum_gorunum, "sag_alt"))
@@ -2559,7 +3276,6 @@ class ModernUyapAsistani(CTkDnD):
         konum_opt.set(kayitli_konum_gorunum)
         konum_opt.pack(fill="x", padx=20)
 
-        # HATIRLANAN RENK BİLGİSİ
         kayitli_renk = self.ayarlar.get("kase_renk", "kirmizi")
         renk_var = ctk.StringVar(value=kayitli_renk)
         renk_frame = ctk.CTkFrame(dialog, fg_color="transparent")
@@ -2583,7 +3299,6 @@ class ModernUyapAsistani(CTkDnD):
                 messagebox.showerror("Hata", str(ve))
                 return
 
-            # AVUKAT VE BAŞLIK TERCİHLERİNİ GİZLİCE KAYDET
             yeni_avukat = avukat_entry.get().strip()
             yeni_baslik = baslik_entry.get().strip()
             if yeni_avukat:
@@ -2758,7 +3473,7 @@ class ModernUyapAsistani(CTkDnD):
     def rehber_penceresi_ac(self):
         pencere = ctk.CTkToplevel(self)
         pencere.title("Kullanım Rehberi")
-        pencere.geometry("640x540")
+        pencere.geometry("680x560")
         pencere.resizable(False, False)
         pencere.after(100, pencere.lift)
 
@@ -2778,13 +3493,14 @@ class ModernUyapAsistani(CTkDnD):
 • UYAP Akıllı MB Bölücüsü büyük dosyaları UYAP limitine (9.5 MB) göre sayfa bütünlüğünü bozmadan ayırır.
 
 3. Dönüştür:
-• UDF (.udf) dosyalarını tek tıkla Microsoft Word (.docx) formatına çevirebilirsiniz.
-• Hazırladığınız Word (.docx) belgelerini fotoğrafları, tabloları ve biçimlendirmesiyle birlikte UYAP Editörün açabileceği '.udf' formatına dönüştürebilirsiniz.
-• Hazırladığınız Word (.docx) dilekçelerini doğrudan resmi UYAP uyumlu PDF'e dönüştürebilirsiniz.
+• PDF ➔ UDF (.udf): PDF evraklarını düzenlenebilir metin katmanları, akıllı tablo yapıları ve gömülü görselleriyle UYAP Şablon Editörünün açabileceği UDF formatına dönüştürür.
+• PDF ➔ Word (.docx): PDF belgelerini sütun yapısını, tabloları ve başlıkları koruyarak düzenlenebilir Word evrakına çevirir.
+• UDF (.udf) ➔ Word: UYAP UDF dosyalarını tek tıkla Microsoft Word (.docx) formatına aktarır.
+• Word (.docx) ➔ UDF: Hazırladığınız dilekçeleri resim ve tablolarıyla UDF editörüne taşır.
 
 4. KVKK, Kaşe & Güvenlik:
 • 'e-İmza & Zaman Damgası Doğrula': Seçili UDF veya PDF'in nitelikli elektronik imza sahibini ve TÜBİTAK/TSA zaman damgası durumunu tek tıkla analiz eder.
-• 'Aslı Gibidir' kaşesi belgenin yönüne duyarlı şekilde otomatik yerleşir. Avukat bilgisi ve kaşe tercihleriniz bir sonraki kullanım için arka planda hatırlanır.
+• 'Aslı Gibidir' kaşesi belgenin yönüne duyarlı şekilde otomatik yerleşir. Tercihleriniz hatırlanır.
 • KVKK Karartma modülü yalnızca geçerli T.C. Kimlik numaralarını algoritmayla doğrulayarak ve IBAN'ları tespit ederek maskeler; ardından metaverileri PDF'ten tamamen kazır."""
 
         txt.insert("0.0", rehber.strip())
@@ -2806,7 +3522,7 @@ class ModernUyapAsistani(CTkDnD):
 
         ctk.CTkLabel(
             dialog,
-            text="Sürüm 1.0.1 • UYAP Kullanıcıları İçin Tasarlandı",
+            text="Sürüm 1.1.0 • UYAP Kullanıcıları İçin Tasarlandı",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color=("#64748B", "#94A3B8")
         ).pack(pady=(0, 16))
