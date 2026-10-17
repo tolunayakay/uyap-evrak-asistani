@@ -6,104 +6,77 @@
 
 **UYAP Evrak Asistanı**, avukatlar, hukuk büroları ve adliye personeli için tasarlanmış modern, hızlı ve yerel çalışan bir evrak yönetim ve optimizasyon masaüstü uygulamasıdır. UYAP dosya boyutu kısıtlamalarını (MB limitleri), UDF format dönüştürme ihtiyaçlarını ve KVKK kapsamındaki veri gizleme gereksinimlerini tek bir modern arayüzde çözer.
 
-Tüm işlemler **çevrimdışı (offline)** yürütülür; gizli müvekkil ve dava dosyalarınız üçüncü taraf sunuculara gönderilmez.
+<img width="1317" height="836" alt="UYAP Evrak Asistanı" src="https://github.com/user-attachments/assets/c7f01b9b-0492-4ac6-81f0-9d6e46266532" />
 
 ---
 
 ## ✨ Temel Özellikler
 
-### 1. 📑 PDF & Görsel Birleştirme & Sıkıştırma
-* **Çoklu Format Desteği:** PDF, JPG, PNG, WEBP, BMP dosyalarını sürükle-bırak yöntemiyle sıraya dizme ve birleştirme.
-* **Akıllı A4 Uyarlama:** Eklenen görseller en-boy oranı korunarak otomatik A4 sayfasına yerleştirilir.
-* **İki Farklı Sıkıştırma Modu:**
-  * **Akıllı Mod (Vektörel):** Metin netliğini korur, gömülü görselleri kayıpsız optimize eder.
-  * **Agresif Raster (150 DPI):** Taranmış ağır evrakları 150 DPI JPEG kalitesine indirgeyerek dosya boyutunu küçültür.
-* **Bates Numaralandırma:** Evrak altlarına `EK-1 | Sayfa 1 / 10` formatında numaralandırma ve ek etiketi basma.
-* **UYAP Akıllı MB Bölücüsü:** UYAP yükleme sınırına (varsayılan 9.5 MB) göre PDF'leri sayfa bütünlüğünü bozmadan otomatik parçalara ayırma.
+### 📑 1. PDF & Görsel Birleştirme & Sıkıştırma
+* **Çoklu Format Desteği:** `PDF`, `JPG`, `PNG`, `WEBP` ve `BMP` formatındaki dosyaları sürükle-bırak yöntemiyle listeye ekleme, sıraya dizme ve tek bir PDF dosyasında birleştirme.
+* **Akıllı A4 Uyarlama:** Eklenen farklı çözünürlük ve boyutlardaki görseller, en-boy oranı (aspect ratio) bozulmadan standart A4 sayfasına yerleştirilir.
+* **Çift Motorlu Sıkıştırma:**
+  * **Akıllı Mod (Vektörel):** Metin tabakalarını ve vektör kalitesini korur; gömülü görselleri kayıpsız optimize eder.
+  * **Agresif Raster (150 DPI):** Taranmış ağır evrakları 150 DPI JPEG seviyesine indirgeyerek okunabilirliği korurken dosya boyutunu küçültür.
+* **Bates Numaralandırma:** Evrak altbilgisine otomatik olarak `EK-1 | Sayfa 1 / 10` formatında numaralandırma ve ek etiketi basma.
+* **UYAP Akıllı MB Bölücüsü:** UYAP yükleme sınırına (varsayılan 9.5 MB) göre büyük PDF'leri sayfa bütünlüğünü bozmadan otomatik parçalara ayırma.
 
-### 2. ✂️ Sayfa Yönetimi
-* **Sayfa Döndürme:** Belirli sayfaları veya tüm belgeyi $90^\circ$, $180^\circ$ veya $270^\circ$ döndürme.
-* **Akıllı Boş Sayfa Temizleme:** Çift taraflı tarayıcılardan kaynaklanan beyaz/boş sayfaları histogram analiziyle tespit edip onay alarak temizler.
-* **Sayfa Sayfa Parçalama:** Her sayfayı bağımsız bir PDF dosyası olarak kaydetme.
-* **Aralık Ayırma:** Belirli sayfaları (`1-3, 5` formatında) seçip yeni bir PDF'e çıkartma.
+### 🖼️ 2. Görsel Sayfa Önizleme & Yönetim (Grid Panel)
+* **Sayfa Matrisi (Küçük Resimler):** PDF belgelerini doğrudan görsel kartlar halinde inceleyebilme.
+* **Sayfa Döndürme & Ayıklama:** Tekli veya çoklu sayfa seçerek 90°, 180°, 270° döndürme ya da istenmeyen sayfaları doğrudan belgeden silme.
+* **Anında Dışa Aktarma:** Görsel matris üzerinden ayıklanan veya yönü düzeltilen sayfaları yeni bir PDF olarak kaydetme.
+* **Boş Sayfa Temizleme:** Çift taraflı tarayıcılardan kaynaklanan boş/arkası görünen sayfaları histogram analiziyle tespit edip kullanıcı onayıyla temizleme.
+* **Sayfa Sayfa Parçalama & Aralık Çıkarma:** Her sayfayı bağımsız bir dosya yapma veya `1-3, 5` formatında aralık seçip yeni belge üretme.
 
-### 3. 🔄 Format Dönüştürücü
-* **UDF ➔ Word (.docx):** UYAP Doküman Editörü (.udf) dosyalarının içindeki XML yapısını çözüp doğrudan Word belgesine çevirme.
-* **Word (.docx) ➔ PDF:** Hazırlanan dilekçeleri Microsoft Word motoru/docx2pdf aracılığıyla tek tıkla resmi PDF formatına dönüştürme.
-* **Metin Önizleme ve Kopyalama:** Taranmamış PDF, Word veya UDF belgelerindeki metinleri ayrıştırıp önizleme ve panoya kopyalama.
+### 🔄 3. Format Dönüştürücü (UDF / Word / PDF)
+* **Word (.docx) ➔ UDF:** Microsoft Word belgelerini doğrudan UYAP Doküman Formatı (`.udf`) standardına dönüştürme (yazı tipi, stil ve paragraflar korunur).
+* **UDF ➔ Word (.docx):** UYAP Doküman Editörü (`.udf`) dosyalarının XML yapısını çözerek biçimlendirmeyi bozmadan düzenlenebilir Word belgesine çevirme.
+* **Word (.docx) ➔ PDF:** Dilekçeleri doğrudan Microsoft Word motoru altyapısıyla resmi PDF formatına dönüştürme.
+* **Metin Önizleme ve Kopyalama:** Taranmamış PDF, Word veya UDF belgelerindeki metinleri ayıklama, anlık önizleme ve tek tıkla panoya kopyalama.
 
-### 4. 🛡️ Hukuki Güvenlik & KVKK Modülü
+### 🔏 4. e-İmza & Zaman Damgası (TSA) Analizi
+* **CAdES / PAdES Taraması:** `.udf` ve `.pdf` formatındaki evraklarda yer alan nitelikli elektronik imzaları ve zaman damgalarını otomatik tespit etme.
+* **Durum Rozetleri:** Dosya listesinde belgelerin yanına anlık durum rozetleri ekleme (`[✓ e-İmzalı]`, `[⏱ Z.Damgalı]`).
+* **Detay Raporlama:** İmzalayan kişi/avukat/hâkim bilgisi, imza tarihi, doğrulama durumu ve resmi TSA sertifika ayrıntılarını özel analiz penceresinde raporlama.
+
+### 🛡️ 5. Hukuki Güvenlik & KVKK Modülü
 * **"Aslı Gibidir" Dijital Kaşesi:** Belgenin yönüne duyarlı olarak sağ/sol/orta alt veya üst köşelere avukat sicil, isim ve tarih bilgisiyle dijital kaşe uygulama.
 * **KVKK Akıllı Karartma (Kalıcı Redaksiyon):**
-  * **T.C. Kimlik Algoritması:** Yalnızca resmi 11 haneli matematiksel doğrulama algoritmasından geçen gerçek T.C. kimlik numaralarını tespit eder ve üzerini kalıcı olarak siyah bantla çizer.
-  * **IBAN Tespiti:** `TR` ile başlayan IBAN numaralarını otomatik bulur ve maskeler.
-  * **Telefon Maskeleme:** Mobil hat formatlarını (05xx / +90) tespit edip gizler.
-  * **Özel Kelime Maskeleme:** Kullanıcının belirteceği isim, adres vb. kelimeleri sayfa içinde arayıp kalıcı olarak redakte eder.
-  * **Metaveri Kazıma (`doc.scrub`):** Maskelenen dosyanın arkasındaki gizli katmanları, metadata bilgilerini ve ekleri tamamen temizler (metin geri döndürülemez).
+  * **Algoritmik T.C. Kimlik Tespiti:** Yalnızca resmi 11 haneli matematiksel algoritma kontrolünden geçen gerçek T.C. kimlik numaralarını tespit eder ve üzerini kalıcı olarak çizer.
+  * **IBAN Maskeleme:** TR ile başlayan banka IBAN numaralarını otomatik tespit edip karartır.
+  * **Telefon Numarası Maskeleme:** Mobil hat formatlarını (`05xx`, `+90`) yakalayarak gizler.
+  * **Özel Kelime Redaksiyonu:** Kullanıcının belirteceği isim, unvan, adres vb. özel kelimeleri arayıp kalıcı olarak bantlar.
+* **Metaveri Kazıma (doc.scrub):** Karartma yapılan dosyalardaki gizli katmanları, metadata bilgilerini ve ekleri tamamen temizler; karartılan metinlerin geri getirilmesini imkânsız kılar.
+
+### ⚙️ 6. Akıllı Tercih Hafızası
+* **Tema Hafızası:** Son seçilen Gece / Gündüz modu (Dark / Light) otomatik kaydedilir.
+* **Kaşe Hafızası:** Girilen avukat adı, sicil, kaşe unvanı, konum ve renk seçimleri arka planda saklanır.
+* **Sessiz Yapılandırma:** Tercihler çalışma dizininde dosya kalabalığı yaratmadan sistemin güvenli yerel uygulama veri alanında saklanır.
 
 ---
 
-## 🛠️ Gereksinimler ve Kurulum
+## 🚀 Sürüm Geçmişi
 
-### Sistem Gereksinimleri
-* **İşletim Sistemi:** Windows 10/11 (macOS ve Linux üzerinde temel özellikler çalışır; Word dönüştürme Windows Word gerektirir)
-* **Python:** Python 3.8 veya üzeri
-
-### Kurulum Adımları
-
-1. Depoyu klonlayın veya indirin:
-   ```bash
-   git clone https://github.com/kullanici-adi/uyap-evrak-asistani.git
-   cd uyap-evrak-asistani
-   ```
-
-2. Gerekli Python kütüphanelerini yükleyin:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Uygulamayı çalıştırın:
-   ```bash
-   python uyap_asistan.py
-   ```
+### 🆕 v1.0.1 Yenilikleri
+* **DOCX ➔ UDF Dönüştürücü:** Hazırlanan Word dilekçelerini doğrudan UYAP Editör formatına (`.udf`) çevirme özelliği eklendi.
+* **Görsel Grid Panel:** PDF sayfalarını küçük resim matrisiyle inceleme, döndürme ve silme yeteneği getirildi.
+* **e-İmza & Zaman Damgası Modülü:** CAdES/PAdES bloklarını okuyan imza doğrulama ve liste rozetleri eklendi.
+* **Kalıcı Ayarlar Altyapısı:** Tema ve kaşe profili tercihleri oturumlar arasında hatırlanacak şekilde güncellendi.
+* **Performans İyileştirmeleri:** Evrak birleştirme ve dönüştürme aşamalarındaki thread senkronizasyonu optimize edildi.
 
 ---
 
-## 📦 Bağımlılıklar (`requirements.txt`)
+## 📦 Kurulum & Çalıştırma
 
-```text
-customtkinter>=5.2.0
-PyMuPDF>=1.23.0
-Pillow>=10.0.0
-python-docx>=1.0.0
-docx2pdf>=0.1.8
-tkinterdnd2>=0.3.0
-```
+Uygulama tamamen **taşınabilir (portable)** yapıdadır; bilgisayarınızda yönetici yetkisi veya ilave bağımlılık gerektirmez.
 
-> **İpucu (Windows Word Dönüşümü):** Word (.docx) belgelerini PDF'e dönüştürmek için bilgisayarınızda Microsoft Word yüklü olmalıdır.
+1. Sağ taraftaki **Releases** sekmesine gidin.
+2. En güncel sürümün altındaki **Assets** bölümünden `UYAP Evrak Asistanı.exe` dosyasını indirin.
+3. Çift tıklayarak doğrudan kullanmaya başlayın.
 
 ---
 
-## 🚀 Tek Dosya Halinde Çalıştırılabilir Dosya (EXE) Yapma
-
-Uygulamayı Python yüklü olmayan bilgisayarlarda çalıştırmak için PyInstaller ile derleyebilirsiniz:
-
-```bash
-pip install pyinstaller
-pyinstaller --noconfirm --onedir --windowed --add-data "logo.ico;." uyap_asistan.py
-```
-
-*(Eğer tek dosya `.exe` istiyorsanız `--onedir` yerine `--onefile` kullanabilirsiniz.)*
-
----
-
-## 🔒 Güvenlik ve Gizlilik
-
-* **Tamamen Yerel:** Belgeler harici bir API'ye veya buluta yüklenmez; tüm kütüphaneler yerel bellek ve disk üzerinde çalışır.
-* **Gerçek Redaksiyon:** KVKK karartması bir görsel katman eklemekle kalmaz; PyMuPDF'in `apply_redactions` ve `scrub` işlevlerini kullanarak veriyi PDF nesne ağacından kalıcı olarak yok eder.
-
----
-
-## 📄 Lisans
-
-Bu proje [MIT Lisansı](LICENSE) kapsamında lisanslanmıştır.
+## 🔒 Gizlilik ve Güvenlik
+* Bu yazılım **tamamen çevrim dışı (offline)** çalışır.
+* Belgeleriniz hiçbir uzak sunucuya, bulut servisine veya üçüncü taraf API'ye iletilmez.
+* Tüm PDF işleme, OCR, redaksiyon ve dönüştürme süreçleri doğrudan yerel bilgisayarınızın işlemcisi üzerinde gerçekleşir.
