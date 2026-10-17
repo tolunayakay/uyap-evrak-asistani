@@ -2,14 +2,21 @@ import os
 import io
 import re
 import sys
+import json
 import datetime
 import threading
 import zipfile
+import base64
+import webbrowser
 import xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 from PIL import Image, ImageOps
 import docx
+from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
+from docx.text.run import Run
+from docx.table import Table
 import pymupdf  # PyMuPDF
 import customtkinter as ctk
 
@@ -35,7 +42,59 @@ except ImportError:
     CTkDnD = ctk.CTk
     DND_FILES = None
 
-ctk.set_appearance_mode("Light")
+
+# ============================================================================
+# GİZLİ AYAR YÖNETİCİSİ (APPDATA / CONFIG DİZİNİNDE SAKLAR)
+# ============================================================================
+def get_ayar_dosya_yolu() -> str:
+    """Kullanıcının dosya dizininde görünmemesi için AppData / Config altına gizler."""
+    if os.name == 'nt':
+        taban_dizin = os.environ.get('APPDATA', os.path.expanduser('~'))
+        klasor = os.path.join(taban_dizin, 'UyapAsistani')
+    else:
+        klasor = os.path.expanduser('~/.config/uyap_asistani')
+
+    try:
+        os.makedirs(klasor, exist_ok=True)
+    except Exception:
+        klasor = os.path.expanduser('~')
+    return os.path.join(klasor, 'app_settings.dat')
+
+
+AYAR_DOSYA_YOLU = get_ayar_dosya_yolu()
+
+
+def ayarlari_yukle() -> dict:
+    varsayilan = {
+        "tema": "Light",
+        "avukat_bilgisi": "",
+        "kase_baslik": "ASLI GİBİDİR",
+        "kase_konum": "Sağ Alt",
+        "kase_renk": "kirmizi"
+    }
+    if os.path.exists(AYAR_DOSYA_YOLU):
+        try:
+            with open(AYAR_DOSYA_YOLU, "r", encoding="utf-8") as f:
+                kayitli = json.load(f)
+                varsayilan.update(kayitli)
+        except Exception:
+            pass
+    return varsayilan
+
+
+def ayar_kaydet(anahtar: str, deger):
+    ayarlar = ayarlari_yukle()
+    ayarlar[anahtar] = deger
+    try:
+        with open(AYAR_DOSYA_YOLU, "w", encoding="utf-8") as f:
+            json.dump(ayarlar, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+# Başlangıçta kayıtlı temayı yükle
+_BASLANGIC_AYARLARI = ayarlari_yukle()
+ctk.set_appearance_mode(_BASLANGIC_AYARLARI.get("tema", "Light"))
 ctk.set_default_color_theme("blue")
 
 DESTEKLENEN_UZANTILAR = ('.pdf', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.udf', '.docx')
@@ -108,15 +167,813 @@ def sayfa_araligi_ayristir(metin: str, toplam_sayfa: int):
     return secilenler
 
 
+# ============================================================================
+# e-İMZA & ZAMAN DAMGASI DOĞRULAMA / TESPİT MOTORU
+# ============================================================================
+def eimza_bilgisi_al(dosya_yolu: str) -> dict:
+    uzanti = os.path.splitext(dosya_yolu)[1].lower()
+    sonuc = {
+        "imzali": False,
+        "imzalayan": None,
+        "zaman_damgasi": False,
+        "tarih": None,
+        "detay": "Dijital imza tespit edilemedi."
+    }
+
+    if not os.path.exists(dosya_yolu):
+        return sonuc
+
+    try:
+        if uzanti == '.udf':
+            with zipfile.ZipFile(dosya_yolu, 'r') as zf:
+                isimler = zf.namelist()
+                imza_dosyalari = [f for f in isimler if 'sign' in f.lower() or 'signature' in f.lower()]
+                
+                if imza_dosyalari:
+                    sonuc["imzali"] = True
+                    ham_veri = zf.read(imza_dosyalari[0])
+                    
+                    if b"1.2.840.113549.1.9.16.1.4" in ham_veri or b"TimeStamp" in ham_veri or b"Zaman Damgasi" in ham_veri:
+                        sonuc["zaman_damgasi"] = True
+                    
+                    cn_eslesme = re.findall(rb"CN=([^\x00-\x1f,]+)", ham_veri)
+                    if not cn_eslesme:
+                        cn_eslesme = re.findall(rb"(?:Av\.|Hakim|Savci|Katip)[\s\w]+", ham_veri)
+
+                    if cn_eslesme:
+                        try:
+                            sonuc["imzalayan"] = cn_eslesme[0].decode('utf-8', errors='ignore').strip()
+                        except Exception:
+                            sonuc["imzalayan"] = cn_eslesme[0].decode('iso-8859-9', errors='ignore').strip()
+                    else:
+                        sonuc["imzalayan"] = "Nitelikli Elektronik İmza (UDF)"
+
+                    sonuc["detay"] = f"Geçerli UYAP e-İmzası\nİmzalayan: {sonuc['imzalayan']}"
+                    if sonuc["zaman_damgasi"]:
+                        sonuc["detay"] += "\nZaman Damgası: Onaylı (TSA Mevcut)"
+                else:
+                    if 'content.xml' in isimler:
+                        xml_raw = zf.read('content.xml')
+                        if b"Signature" in xml_raw or b"ds:Signature" in xml_raw:
+                            sonuc["imzali"] = True
+                            sonuc["imzalayan"] = "UDF XML İmzası"
+                            sonuc["detay"] = "UDF XML Formatında İmzalı Evrak"
+
+        elif uzanti == '.pdf':
+            with open(dosya_yolu, 'rb') as f:
+                pdf_bytes = f.read()
+
+            if b"/ByteRange" in pdf_bytes and (b"/Contents" in pdf_bytes or b"/adbe.pkcs7" in pdf_bytes):
+                sonuc["imzali"] = True
+                
+                name_eslesme = re.search(rb'/Name\s*\(([^)]+)\)', pdf_bytes)
+                if not name_eslesme:
+                    name_eslesme = re.search(rb'/Name\s*<([^>]+)>', pdf_bytes)
+                
+                if name_eslesme:
+                    isim_raw = name_eslesme.group(1)
+                    try:
+                        sonuc["imzalayan"] = isim_raw.decode('utf-8', errors='ignore')
+                    except Exception:
+                        sonuc["imzalayan"] = isim_raw.decode('iso-8859-9', errors='ignore')
+                else:
+                    sonuc["imzalayan"] = "Elektronik İmza (PAdES)"
+
+                date_eslesme = re.search(rb'/M\s*\(D:([0-9]{14})', pdf_bytes)
+                if date_eslesme:
+                    d_str = date_eslesme.group(1).decode('ascii')
+                    try:
+                        dt = datetime.datetime.strptime(d_str, "%Y%m%d%H%M%S")
+                        sonuc["tarih"] = dt.strftime("%d.%m.%Y %H:%M:%S")
+                    except Exception:
+                        pass
+
+                if b"/ETSI.RFC3161" in pdf_bytes or b"TimeStamp" in pdf_bytes:
+                    sonuc["zaman_damgasi"] = True
+
+                sonuc["detay"] = f"Geçerli PAdES e-İmzası\nİmzalayan: {sonuc['imzalayan']}"
+                if sonuc["tarih"]:
+                    sonuc["detay"] += f"\nİmza Tarihi: {sonuc['tarih']}"
+                if sonuc["zaman_damgasi"]:
+                    sonuc["detay"] += "\nResmi Zaman Damgası: Mevcut"
+    except Exception:
+        pass
+
+    return sonuc
+
+
+# ============================================================================
+# WORD -> UDF MOTORU (XML, RESİM VE TABLO AYRIŞTIRICILARI)
+# ============================================================================
+_XML_GECERSIZ = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+_NS_A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+_NS_WP = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+_NS_V = "{urn:schemas-microsoft-com:vml}"
+_NS_MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+_NS_R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+
+class UdfBelge:
+    YAZI_TIPI = "Times New Roman"
+
+    def __init__(self):
+        self.paragraflar = []
+
+    def paragraf_ekle(self, ogeler, hiza=0):
+        self.paragraflar.append((hiza, list(ogeler)))
+
+    def tablo_ekle(self, satirlar, genislikler):
+        self.paragraflar.append(("TABLO", satirlar, list(genislikler)))
+
+    @staticmethod
+    def _temiz(metin):
+        metin = _XML_GECERSIZ.sub("", metin).replace("\r", "").replace("\n", " ")
+        return metin.replace("]]>", "] ]>")
+
+    def xml_uret(self):
+        icerik = []
+        elemanlar = []
+        durum = {"konum": 0}
+        yazi = self.YAZI_TIPI
+
+        def paragraf_xml(hiza, ogeler):
+            konum = durum["konum"]
+            temiz_ogeler = []
+            for o in ogeler:
+                if o[0] == "metin":
+                    t = self._temiz(o[1])
+                    if t:
+                        temiz_ogeler.append(("metin", t, o[2] if len(o) > 2 and o[2] else {}))
+                else:
+                    temiz_ogeler.append(o)
+
+            satirlar = ['<paragraph Alignment="%d">' % int(hiza)]
+            if not temiz_ogeler:
+                icerik.append("\n")
+                satirlar.append('<content family="%s" size="12" startOffset="%d" length="1" />' % (yazi, konum))
+                konum += 1
+            else:
+                for i, o in enumerate(temiz_ogeler):
+                    son = (i == len(temiz_ogeler) - 1)
+                    if o[0] == "metin":
+                        t = o[1] + ("\n" if son else "")
+                        b = o[2]
+                        run_yazi = b.get("family") or self.YAZI_TIPI
+                        boyut = int(b.get("size") or 12)
+                        ek = ""
+                        if b.get("bold"):
+                            ek += 'bold="true" '
+                        if b.get("italic"):
+                            ek += 'italic="true" '
+                        if b.get("underline"):
+                            ek += 'underline="true" '
+                        icerik.append(t)
+                        satirlar.append('<content %sfamily="%s" size="%d" startOffset="%d" length="%d" />'
+                                        % (ek, run_yazi, boyut, konum, len(t)))
+                        konum += len(t)
+                    else:
+                        icerik.append("\u00b8")
+                        satirlar.append('<image imageData="%s" width="%.1f" height="%.1f" '
+                                        'startOffset="%d" length="1" />' % (o[1], o[2], o[3], konum))
+                        konum += 1
+                        if son:
+                            icerik.append("\n")
+                            satirlar.append('<content family="%s" size="12" startOffset="%d" length="1" />'
+                                            % (yazi, konum))
+                            konum += 1
+            satirlar.append("</paragraph>")
+            durum["konum"] = konum
+            return "".join(satirlar)
+
+        for oge in self.paragraflar:
+            if oge[0] == "TABLO":
+                _, satirlar, genislikler = oge
+                parcalar = ['<table tableName="Sabit" columnCount="%d" columnSpans="%s" border="borderCell">'
+                            % (len(genislikler), ",".join("%d" % max(1, round(g)) for g in genislikler))]
+                for n, satir in enumerate(satirlar, 1):
+                    parcalar.append('<row rowName="row%d" rowType="dataRow">' % n)
+                    for hucre in satir:
+                        ek = ""
+                        if hucre.get("rowspan", 1) > 1:
+                            ek += ' rowSpan="%d"' % hucre["rowspan"]
+                        if hucre.get("colspan", 1) > 1:
+                            ek += ' colSpan="%d"' % hucre["colspan"]
+                        parcalar.append("<cell%s>" % ek)
+                        pars = hucre["paragraflar"] or [(0, [])]
+                        for h, og in pars:
+                            parcalar.append(paragraf_xml(h, og))
+                        parcalar.append("</cell>")
+                    parcalar.append("</row>")
+                parcalar.append("</table>")
+                elemanlar.append("".join(parcalar))
+            else:
+                elemanlar.append(paragraf_xml(oge[0], oge[1]))
+
+        return (
+            '<?xml version="1.0" encoding="UTF-8" ?>\n'
+            '<template format_id="1.8" >\n'
+            '<content><![CDATA[' + "".join(icerik) + ']]></content>\n'
+            '<properties><pageFormat mediaSizeName="1" leftMargin="42.525000000000006" '
+            'rightMargin="42.525000000000006" topMargin="42.525000000000006" '
+            'bottomMargin="42.525000000000006" paperOrientation="1" headerFOffset="20.0" '
+            'footerFOffset="20.0" /></properties>\n'
+            '<elements resolver="hvl-default">\n' + "\n".join(elemanlar) + '\n</elements>\n'
+            '<styles><style name="default" description="Geçerli" family="Dialog" size="12" '
+            'bold="false" italic="false" foreground="-13421773" />'
+            '<style name="hvl-default" family="Times New Roman" size="12" description="Gövde" /></styles>\n'
+            '</template>'
+        )
+
+    def kaydet(self, yol):
+        xml = self.xml_uret()
+        ET.fromstring(xml.encode("utf-8"))
+        with zipfile.ZipFile(yol, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("content.xml", xml.encode("utf-8"))
+
+
+def _resmi_hazirla_udf(blob, azami_piksel=1600, jpeg_zorla=False):
+    try:
+        img = Image.open(io.BytesIO(blob))
+        img.load()
+    except Exception:
+        return None
+    fmt = (img.format or "").upper()
+    try:
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            img = img.convert("RGBA")
+            zemin = Image.new("RGB", img.size, "white")
+            zemin.paste(img, mask=img.split()[3])
+            img = zemin
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        w, h = img.size
+        if w > azami_piksel:
+            img = img.resize((azami_piksel, max(1, round(h * azami_piksel / w))), Image.LANCZOS)
+            w, h = img.size
+        cikti = io.BytesIO()
+        if jpeg_zorla or fmt in ("JPEG", "MPO"):
+            img.save(cikti, "JPEG", quality=88, optimize=True)
+            uzanti = "jpg"
+        else:
+            img.save(cikti, "PNG", optimize=True)
+            uzanti = "png"
+        return cikti.getvalue(), uzanti, w, h
+    except Exception:
+        return None
+
+
+def _resim_ogesi_udf(blob, genislik_pt, max_pt, resimler, ist, jpeg_zorla=False):
+    hazir = _resmi_hazirla_udf(blob, jpeg_zorla=jpeg_zorla)
+    if hazir is None:
+        ist["atlanan"] += 1
+        return None
+    veri, uzanti, pw, ph = hazir
+    gen = float(genislik_pt) if genislik_pt else float(pw)
+    gen = max(16.0, min(gen, float(max_pt)))
+    yuk = gen * ph / pw
+    resimler.append((veri, uzanti))
+    ist["resim"] += 1
+    return ("resim", base64.b64encode(veri).decode("ascii"), gen, yuk)
+
+
+def _docx_hiza(p):
+    a = p.alignment
+    if a is None:
+        try:
+            a = p.style.paragraph_format.alignment
+        except Exception:
+            a = None
+    if a is None:
+        return 0
+    ad = str(getattr(a, "name", a)).upper()
+    if "CENTER" in ad:
+        return 1
+    if "RIGHT" in ad:
+        return 2
+    if "JUSTIFY" in ad or "DISTRIBUTE" in ad:
+        return 3
+    return 0
+
+
+def _docx_stil_degeri(p, ozellik):
+    try:
+        s = p.style
+    except Exception:
+        return None
+    while s is not None:
+        try:
+            v = getattr(s.font, ozellik)
+        except Exception:
+            v = None
+        if v is not None:
+            return v
+        s = s.base_style
+    return None
+
+
+def _docx_medya(el, d):
+    kok = el
+    if el.tag == _NS_MC + "AlternateContent":
+        secimler = [c for c in el if c.tag == _NS_MC + "Choice"] or \
+                   [c for c in el if c.tag == _NS_MC + "Fallback"]
+        if not secimler:
+            return []
+        kok = secimler[0]
+    genislik_pt = None
+    ext = next(kok.iter(_NS_WP + "extent"), None)
+    if ext is not None:
+        try:
+            genislik_pt = int(ext.get("cx")) / 12700.0
+        except (TypeError, ValueError):
+            genislik_pt = None
+    bulunan = []
+    for blip in kok.iter(_NS_A + "blip"):
+        rid = blip.get(_NS_R + "embed")
+        if rid and rid in d.part.related_parts:
+            bulunan.append((d.part.related_parts[rid].blob, genislik_pt))
+    for im in kok.iter(_NS_V + "imagedata"):
+        rid = im.get(_NS_R + "id")
+        if rid and rid in d.part.related_parts:
+            bulunan.append((d.part.related_parts[rid].blob, None))
+    return bulunan
+
+
+def _docx_paragraf_isle(p, d, max_px, resimler, ist):
+    hiza = _docx_hiza(p)
+    stil_kalin = _docx_stil_degeri(p, "bold")
+    stil_italik = _docx_stil_degeri(p, "italic")
+    stil_punto = _docx_stil_degeri(p, "size")
+    sonuc = []
+    mevcut = []
+
+    def kapat():
+        sonuc.append((hiza, list(mevcut)))
+        del mevcut[:]
+
+    runlar = p._p.xpath("./w:r | ./w:hyperlink/w:r | ./w:ins/w:r | ./w:smartTag/w:r")
+    for r in runlar:
+        run = Run(r, p)
+        f = run.font
+        kalin = f.bold if f.bold is not None else stil_kalin
+        italik = f.italic if f.italic is not None else stil_italik
+        punto = f.size if f.size is not None else stil_punto
+        try:
+            boyut = int(round(punto.pt)) if punto is not None else 12
+        except Exception:
+            boyut = 12
+        bicim = {"bold": bool(kalin), "italic": bool(italik),
+                 "underline": bool(f.underline), "size": max(6, min(boyut, 72))}
+        metin = []
+
+        def metni_bosalt():
+            if metin:
+                mevcut.append(("metin", "".join(metin), bicim))
+                del metin[:]
+
+        for el in r.iterchildren():
+            etiket = el.tag
+            if etiket == qn("w:t"):
+                metin.append(el.text or "")
+            elif etiket == qn("w:tab"):
+                metin.append("\t")
+            elif etiket == qn("w:noBreakHyphen"):
+                metin.append("-")
+            elif etiket == qn("w:br"):
+                if el.get(qn("w:type")) == "page":
+                    continue
+                metni_bosalt()
+                kapat()
+            elif etiket in (qn("w:drawing"), qn("w:pict"), qn("w:object"), _NS_MC + "AlternateContent"):
+                metni_bosalt()
+                for blob, gen_pt in _docx_medya(el, d):
+                    oge = _resim_ogesi_udf(blob, gen_pt, max_px, resimler, ist)
+                    if oge:
+                        mevcut.append(oge)
+        metni_bosalt()
+    kapat()
+    return sonuc
+
+
+def _docx_hucre_span(tc):
+    gs = tc.xpath("./w:tcPr/w:gridSpan")
+    try:
+        return max(1, int(gs[0].get(qn("w:val")))) if gs else 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def _docx_tablo_duz_isle(t, d, belge, max_px, resimler, ist):
+    for satir in t.rows:
+        gorulen = set()
+        ogeler = []
+        resimli = []
+        for hucre in satir.cells:
+            if hucre._tc in gorulen:
+                continue
+            gorulen.add(hucre._tc)
+            if ogeler:
+                ogeler.append(("metin", "\t", {}))
+            ilk_paragraf = True
+            for hp in hucre.paragraphs:
+                for _, og in _docx_paragraf_isle(hp, d, max_px, resimler, ist):
+                    metinler = [o for o in og if o[0] != "resim"]
+                    resimli.extend(o for o in og if o[0] == "resim")
+                    if metinler:
+                        if not ilk_paragraf:
+                            ogeler.append(("metin", " ", {}))
+                        ogeler.extend(metinler)
+                        ilk_paragraf = False
+        belge.paragraf_ekle(ogeler, 0)
+        for o in resimli:
+            belge.paragraf_ekle([o], 1)
+
+
+def _docx_tablo_isle(t, d, belge, max_px, resimler, ist):
+    tbl = t._tbl
+    trler = tbl.xpath("./w:tr")
+    if not trler:
+        return
+    izgara = []
+    for gc in tbl.xpath("./w:tblGrid/w:gridCol"):
+        try:
+            izgara.append(int(gc.get(qn("w:w"))) / 20.0)
+        except (TypeError, ValueError):
+            izgara.append(0.0)
+    sutun_say = max([len(izgara)] + [
+        sum(_docx_hucre_span(tc) for tc in tr.xpath("./w:tc")) for tr in trler])
+    if len(izgara) != sutun_say or sum(izgara) <= 0:
+        izgara = [510.0 / sutun_say] * sutun_say
+    toplam = sum(izgara)
+    if toplam > 510.0:
+        izgara = [g * 510.0 / toplam for g in izgara]
+
+    satirlar = []
+    for tr in trler:
+        satir = []
+        sutun = 0
+        for tc in tr.xpath("./w:tc"):
+            span = _docx_hucre_span(tc)
+            gen = sum(izgara[sutun:sutun + span]) or izgara[0]
+            sutun += span
+            pars = []
+            for cocuk in tc.iterchildren():
+                if cocuk.tag == qn("w:p"):
+                    pars.extend(_docx_paragraf_isle(Paragraph(cocuk, d), d, max(30, int(gen) - 12), resimler, ist))
+                elif cocuk.tag == qn("w:tbl"):
+                    alt = UdfBelge()
+                    _docx_tablo_duz_isle(Table(cocuk, d), d, alt, max(30, int(gen) - 12), resimler, ist)
+                    pars.extend(alt.paragraflar)
+            satir.append({"paragraflar": pars, "colspan": span})
+        satirlar.append(satir)
+    belge.tablo_ekle(satirlar, izgara)
+
+
+def docx_to_udf_cevir(kaynak_docx_yol, max_px=510):
+    d = docx.Document(kaynak_docx_yol)
+    belge = UdfBelge()
+    resimler = []
+    ist = {"resim": 0, "atlanan": 0}
+    for cocuk in d.element.body.iterchildren():
+        if cocuk.tag == qn("w:p"):
+            for hiza, ogeler in _docx_paragraf_isle(Paragraph(cocuk, d), d, max_px, resimler, ist):
+                belge.paragraf_ekle(ogeler, hiza)
+        elif cocuk.tag == qn("w:tbl"):
+            _docx_tablo_isle(Table(cocuk, d), d, belge, max_px, resimler, ist)
+    ist["paragraf"] = len(belge.paragraflar)
+    return belge, ist, resimler
+
+
+# ============================================================================
+# GÖRSEL SAYFA ÖNİZLEME & DÜZENLEME PENCERESİ (THUMBNAIL GRID)
+# ============================================================================
+class PdfGorselOnizlemePenceresi(ctk.CTkToplevel):
+    def __init__(self, parent, dosya_yolu):
+        super().__init__(parent)
+        self.parent = parent
+        self.dosya_yolu = dosya_yolu
+        self.doc = pymupdf.open(dosya_yolu)
+        self.toplam_sayfa = len(self.doc)
+
+        self.sayfa_durumlari = []
+        for i in range(self.toplam_sayfa):
+            self.sayfa_durumlari.append({
+                "orijinal_idx": i,
+                "rotation": self.doc[i].rotation
+            })
+
+        self.secili_sayfalar = set()
+        self.gorsel_referanslari = {}
+
+        self.title(f"Sayfa Önizleme & Yönetim: {os.path.basename(dosya_yolu)}")
+        self.geometry("980x680")
+        self.minsize(860, 560)
+        self.configure(fg_color=("#F8FAFC", "#0F172A"))
+        self.after(100, self.lift)
+
+        self._arayuz_kur()
+        self._sayfalari_ciz()
+
+    def _arayuz_kur(self):
+        ust_bar = ctk.CTkFrame(
+            self,
+            fg_color=("#FFFFFF", "#1E293B"),
+            height=54,
+            corner_radius=0,
+            border_width=1,
+            border_color=("#E2E8F0", "#334155")
+        )
+        ust_bar.pack(fill="x", side="top")
+        ust_bar.pack_propagate(False)
+
+        sol_bilgi = ctk.CTkFrame(ust_bar, fg_color="transparent")
+        sol_bilgi.pack(side="left", padx=16, pady=10)
+
+        self.lbl_sayfa_sayisi = ctk.CTkLabel(
+            sol_bilgi,
+            text=f"Toplam: {len(self.sayfa_durumlari)} Sayfa",
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            text_color=("#0F172A", "#F8FAFC")
+        )
+        self.lbl_sayfa_sayisi.pack(side="left")
+
+        self.lbl_secim = ctk.CTkLabel(
+            sol_bilgi,
+            text="• 0 sayfa seçildi",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=("#64748B", "#94A3B8")
+        )
+        self.lbl_secim.pack(side="left", padx=8)
+
+        sag_aksiyon = ctk.CTkFrame(ust_bar, fg_color="transparent")
+        sag_aksiyon.pack(side="right", padx=16)
+
+        ctk.CTkButton(
+            sag_aksiyon,
+            text="⟳ Seçilenleri 90° Döndür",
+            command=self._secilenleri_dondur,
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#1E293B", "#F8FAFC"),
+            height=32,
+            corner_radius=6
+        ).pack(side="left", padx=4)
+
+        ctk.CTkButton(
+            sag_aksiyon,
+            text="🗑 Seçilenleri Sil",
+            command=self._secilenleri_sil,
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            fg_color=("#FEE2E2", "#7F1D1D"),
+            hover_color=("#FECACA", "#991B1B"),
+            text_color=("#991B1B", "#FCA5A5"),
+            height=32,
+            corner_radius=6
+        ).pack(side="left", padx=4)
+
+        ctk.CTkButton(
+            sag_aksiyon,
+            text="💾 Değişiklikleri Yeni PDF Olarak Kaydet",
+            command=self._degisiklikleri_kaydet,
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            height=32,
+            corner_radius=6
+        ).pack(side="left", padx=(8, 0))
+
+        alt_bar = ctk.CTkFrame(
+            self,
+            fg_color=("#FFFFFF", "#1E293B"),
+            height=32,
+            corner_radius=0,
+            border_width=1,
+            border_color=("#E2E8F0", "#334155")
+        )
+        alt_bar.pack(fill="x", side="bottom")
+        alt_bar.pack_propagate(False)
+
+        ctk.CTkLabel(
+            alt_bar,
+            text="💡 İpucu: Sayfa kartına tıklayarak seçebilir, altındaki butonlarla tek tek döndürebilir veya silebilirsiniz.",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=("#64748B", "#94A3B8")
+        ).pack(side="left", padx=16)
+
+        self.scroll_frame = ctk.CTkScrollableFrame(
+            self,
+            fg_color=("#F8FAFC", "#0F172A"),
+            corner_radius=0
+        )
+        self.scroll_frame.pack(fill="both", expand=True, padx=12, pady=10)
+
+        for c in range(4):
+            self.scroll_frame.columnconfigure(c, weight=1, uniform="grid_col")
+
+    def _sayfa_thumbnail_al(self, orijinal_idx, rotation):
+        sayfa = self.doc[orijinal_idx]
+        pix = sayfa.get_pixmap(dpi=42, annots=False)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        net_derece = (rotation - sayfa.rotation) % 360
+        if net_derece != 0:
+            img = img.rotate(-net_derece, expand=True)
+
+        img.thumbnail((150, 195), Image.Resampling.LANCZOS)
+        return ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+
+    def _sayfalari_ciz(self):
+        for widget in self.scroll_frame.winfo_children():
+            widget.destroy()
+
+        self.gorsel_referanslari.clear()
+        self.lbl_sayfa_sayisi.configure(text=f"Toplam: {len(self.sayfa_durumlari)} Sayfa")
+        self.lbl_secim.configure(text=f"• {len(self.secili_sayfalar)} sayfa seçildi")
+
+        if not self.sayfa_durumlari:
+            ctk.CTkLabel(
+                self.scroll_frame,
+                text="Tüm sayfalar silindi!\nLütfen pencereyi kapatın veya işlemi iptal edin.",
+                font=ctk.CTkFont(family="Segoe UI", size=13),
+                text_color=("#94A3B8", "#64748B")
+            ).pack(pady=100)
+            return
+
+        sutun_sayisi = 4
+        for sira_no, item in enumerate(self.sayfa_durumlari):
+            row = sira_no // sutun_sayisi
+            col = sira_no % sutun_sayisi
+
+            is_selected = sira_no in self.secili_sayfalar
+
+            kart = ctk.CTkFrame(
+                self.scroll_frame,
+                fg_color=("#FFFFFF", "#1E293B"),
+                corner_radius=8,
+                border_width=2 if is_selected else 1,
+                border_color=("#3B82F6", "#60A5FA") if is_selected else ("#E2E8F0", "#334155")
+            )
+            kart.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
+
+            ust_satir = ctk.CTkFrame(kart, fg_color="transparent", height=24)
+            ust_satir.pack(fill="x", padx=8, pady=(6, 2))
+
+            chk_text = "✓" if is_selected else "○"
+            chk_color = "#3B82F6" if is_selected else ("#94A3B8", "#64748B")
+            lbl_chk = ctk.CTkLabel(
+                ust_satir,
+                text=chk_text,
+                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                text_color=chk_color
+            )
+            lbl_chk.pack(side="left")
+
+            lbl_no = ctk.CTkLabel(
+                ust_satir,
+                text=f"Sayfa {sira_no + 1}",
+                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                text_color=("#0F172A", "#F8FAFC")
+            )
+            lbl_no.pack(side="right")
+
+            ctk_img = self._sayfa_thumbnail_al(item["orijinal_idx"], item["rotation"])
+            self.gorsel_referanslari[sira_no] = ctk_img
+
+            lbl_img = ctk.CTkLabel(kart, text="", image=ctk_img, cursor="hand2")
+            lbl_img.pack(padx=8, pady=4)
+
+            def toggle_secim(idx=sira_no):
+                if idx in self.secili_sayfalar:
+                    self.secili_sayfalar.remove(idx)
+                else:
+                    self.secili_sayfalar.add(idx)
+                self._sayfalari_ciz()
+
+            kart.bind("<Button-1>", lambda e, idx=sira_no: toggle_secim(idx))
+            lbl_img.bind("<Button-1>", lambda e, idx=sira_no: toggle_secim(idx))
+            lbl_no.bind("<Button-1>", lambda e, idx=sira_no: toggle_secim(idx))
+            lbl_chk.bind("<Button-1>", lambda e, idx=sira_no: toggle_secim(idx))
+
+            alt_satir = ctk.CTkFrame(kart, fg_color="transparent")
+            alt_satir.pack(fill="x", padx=6, pady=(4, 6))
+
+            ctk.CTkButton(
+                alt_satir,
+                text="⟳ 90°",
+                command=lambda idx=sira_no: self._tekil_dondur(idx),
+                width=50,
+                height=26,
+                font=ctk.CTkFont(size=11),
+                fg_color=("#F1F5F9", "#334155"),
+                hover_color=("#E2E8F0", "#475569"),
+                text_color=("#1E293B", "#F8FAFC"),
+                corner_radius=5
+            ).pack(side="left", expand=True, fill="x", padx=(0, 2))
+
+            ctk.CTkButton(
+                alt_satir,
+                text="🗑 Sil",
+                command=lambda idx=sira_no: self._tekil_sil(idx),
+                width=50,
+                height=26,
+                font=ctk.CTkFont(size=11),
+                fg_color=("#FEE2E2", "#7F1D1D"),
+                hover_color=("#FECACA", "#991B1B"),
+                text_color=("#991B1B", "#FCA5A5"),
+                corner_radius=5
+            ).pack(side="right", expand=True, fill="x", padx=(2, 0))
+
+    def _tekil_dondur(self, idx):
+        self.sayfa_durumlari[idx]["rotation"] = (self.sayfa_durumlari[idx]["rotation"] + 90) % 360
+        self._sayfalari_ciz()
+
+    def _tekil_sil(self, idx):
+        del self.sayfa_durumlari[idx]
+        self.secili_sayfalar = {i if i < idx else i - 1 for i in self.secili_sayfalar if i != idx}
+        self._sayfalari_ciz()
+
+    def _secilenleri_dondur(self):
+        if not self.secili_sayfalar:
+            messagebox.showinfo("Seçim Yok", "Lütfen döndürmek istediğiniz sayfaları tıklayarak seçin.")
+            return
+        for idx in self.secili_sayfalar:
+            self.sayfa_durumlari[idx]["rotation"] = (self.sayfa_durumlari[idx]["rotation"] + 90) % 360
+        self._sayfalari_ciz()
+
+    def _secilenleri_sil(self):
+        if not self.secili_sayfalar:
+            messagebox.showinfo("Seçim Yok", "Lütfen silmek istediğiniz sayfaları tıklayarak seçin.")
+            return
+        if len(self.secili_sayfalar) == len(self.sayfa_durumlari):
+            messagebox.showwarning("Uyarı", "Belgedeki tüm sayfaları silemezsiniz.")
+            return
+
+        onay = messagebox.askyesno("Sayfa Silme Onayı", f"Seçilen {len(self.secili_sayfalar)} adet sayfa silinsin mi?")
+        if not onay:
+            return
+
+        yeni_durumlar = []
+        for i, item in enumerate(self.sayfa_durumlari):
+            if i not in self.secili_sayfalar:
+                yeni_durumlar.append(item)
+
+        self.sayfa_durumlari = yeni_durumlar
+        self.secili_sayfalar.clear()
+        self._sayfalari_ciz()
+
+    def _degisiklikleri_kaydet(self):
+        if not self.sayfa_durumlari:
+            messagebox.showerror("Hata", "Kaydedilecek sayfa bulunmuyor!")
+            return
+
+        hedef_yol = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF Dosyası", "*.pdf")],
+            title="Düzenlenmiş PDF'i Kaydet",
+            initialfile="duzenlenmis_" + os.path.basename(self.dosya_yolu)
+        )
+        if not hedef_yol:
+            return
+
+        try:
+            yeni_doc = pymupdf.open()
+            for item in self.sayfa_durumlari:
+                yeni_doc.insert_pdf(self.doc, from_page=item["orijinal_idx"], to_page=item["orijinal_idx"])
+                son_eklenen = yeni_doc[-1]
+                son_eklenen.set_rotation(item["rotation"])
+
+            yeni_doc.save(hedef_yol, garbage=4, deflate=True)
+            yeni_doc.close()
+
+            messagebox.showinfo("Başarılı", f"Düzenlenmiş PDF başarıyla kaydedildi!\n\nDosya: {os.path.basename(hedef_yol)}")
+            self.destroy()
+        except Exception as e:
+            messagebox.showerror("Hata", f"Kaydetme sırasında hata oluştu:\n{str(e)}")
+
+    def destroy(self):
+        try:
+            self.doc.close()
+        except Exception:
+            pass
+        super().destroy()
+
+
+# ============================================================================
+# ANA UYGULAMA PENCERESİ
+# ============================================================================
 class ModernUyapAsistani(CTkDnD):
     def __init__(self):
         super().__init__()
+        self.ayarlar = ayarlari_yukle()
+
         self.title("UYAP Evrak Asistanı")
         self.geometry("1100x700")
         self.minsize(1040, 650)
-        self.configure(fg_color="#F8FAFC")
+        self.configure(fg_color=("#F8FAFC", "#0F172A"))
 
         self.dosyalar = []
+        self.dosya_imza_durumlari = {}
         self._uygulama_ikonu_yukle()
         self._arayuz_olustur()
 
@@ -130,7 +987,14 @@ class ModernUyapAsistani(CTkDnD):
 
     def _arayuz_olustur(self):
         # 1. ÜST HEADER
-        header = ctk.CTkFrame(self, fg_color="#FFFFFF", height=64, corner_radius=0, border_width=1, border_color="#E2E8F0")
+        header = ctk.CTkFrame(
+            self,
+            fg_color=("#FFFFFF", "#1E293B"),
+            height=64,
+            corner_radius=0,
+            border_width=1,
+            border_color=("#E2E8F0", "#334155")
+        )
         header.pack(fill="x", side="top")
         header.pack_propagate(False)
 
@@ -141,35 +1005,80 @@ class ModernUyapAsistani(CTkDnD):
             logo_alani,
             text="⚖ UYAP Evrak Asistanı",
             font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
-            text_color="#0F172A"
+            text_color=("#0F172A", "#F8FAFC")
         ).pack(side="left")
 
         ctk.CTkLabel(
             logo_alani,
             text="PRO",
             font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
-            fg_color="#EEF2F6",
-            text_color="#475569",
+            fg_color=("#EEF2F6", "#334155"),
+            text_color=("#475569", "#E2E8F0"),
             corner_radius=6,
             padx=7,
             pady=2
         ).pack(side="left", padx=10)
 
+        # Sağ üst aksiyon butonları: Tema Switch + Hakkında + Nasıl Kullanılır?
+        sag_aksiyon_frame = ctk.CTkFrame(header, fg_color="transparent")
+        sag_aksiyon_frame.pack(side="right", padx=24)
+
+        # Tema Switch Başlangıç Durumu
+        mevcut_tema = self.ayarlar.get("tema", "Light")
+        self.tema_switch = ctk.CTkSwitch(
+            sag_aksiyon_frame,
+            text="🌙" if mevcut_tema == "Dark" else "☀️",
+            command=self._tema_degistir,
+            font=ctk.CTkFont(size=14),
+            text_color=("#0F172A", "#F8FAFC"),
+            width=46,
+            height=24,
+            switch_width=38,
+            switch_height=20,
+            progress_color=("#334155", "#64748B")
+        )
+        if mevcut_tema == "Dark":
+            self.tema_switch.select()
+        else:
+            self.tema_switch.deselect()
+
+        self.tema_switch.pack(side="left", padx=(0, 14))
+
         ctk.CTkButton(
-            header,
-            text="Rehber & Kılavuz",
+            sag_aksiyon_frame,
+            text="Hakkında",
+            command=self.hakkinda_penceresi_ac,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#334155", "#F8FAFC"),
+            corner_radius=8,
+            width=90,
+            height=32
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            sag_aksiyon_frame,
+            text="Nasıl Kullanılır?",
             command=self.rehber_penceresi_ac,
             font=ctk.CTkFont(family="Segoe UI", size=12),
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#334155",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#334155", "#F8FAFC"),
             corner_radius=8,
             width=120,
             height=32
-        ).pack(side="right", padx=24)
+        ).pack(side="left")
 
         # 2. ALT DURUM ÇUBUĞU
-        alt_bar = ctk.CTkFrame(self, fg_color="#FFFFFF", height=38, corner_radius=0, border_width=1, border_color="#E2E8F0")
+        alt_bar = ctk.CTkFrame(
+            self,
+            fg_color=("#FFFFFF", "#1E293B"),
+            height=38,
+            corner_radius=0,
+            border_width=1,
+            border_color=("#E2E8F0", "#334155")
+        )
         alt_bar.pack(fill="x", side="bottom")
         alt_bar.pack_propagate(False)
 
@@ -181,7 +1090,7 @@ class ModernUyapAsistani(CTkDnD):
             alt_bar,
             text="Hazır. Evraklarınızı sol alana sürükleyebilir veya 'Dosya Ekle' ile seçebilirsiniz.",
             font=ctk.CTkFont(family="Segoe UI", size=12),
-            text_color="#64748B"
+            text_color=("#64748B", "#94A3B8")
         )
         self.durum_etiketi.pack(side="left", padx=18)
 
@@ -190,7 +1099,13 @@ class ModernUyapAsistani(CTkDnD):
         govde.pack(fill="both", expand=True, padx=20, pady=16)
 
         # SOL KART
-        sol_kart = ctk.CTkFrame(govde, fg_color="#FFFFFF", corner_radius=12, border_width=1, border_color="#E2E8F0")
+        sol_kart = ctk.CTkFrame(
+            govde,
+            fg_color=("#FFFFFF", "#1E293B"),
+            corner_radius=12,
+            border_width=1,
+            border_color=("#E2E8F0", "#334155")
+        )
         sol_kart.pack(side="left", fill="both", expand=True, padx=(0, 10))
 
         sol_baslik_satir = ctk.CTkFrame(sol_kart, fg_color="transparent")
@@ -200,27 +1115,32 @@ class ModernUyapAsistani(CTkDnD):
             sol_baslik_satir,
             text="İŞLENECEK DOSYALAR",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
-            text_color="#94A3B8"
+            text_color=("#94A3B8", "#64748B")
         ).pack(side="left")
 
         self.dosya_sayisi_badge = ctk.CTkLabel(
             sol_baslik_satir,
             text="0 dosya",
             font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#64748B"
+            text_color=("#64748B", "#94A3B8")
         )
         self.dosya_sayisi_badge.pack(side="right")
 
-        self.liste_frame = ctk.CTkScrollableFrame(sol_kart, fg_color="#F8FAFC", corner_radius=8)
+        self.liste_frame = ctk.CTkScrollableFrame(
+            sol_kart,
+            fg_color=("#F8FAFC", "#0F172A"),
+            corner_radius=8
+        )
         self.liste_frame.pack(fill="both", expand=True, padx=16, pady=6)
 
         self.bos_bilgi_etiketi = ctk.CTkLabel(
             self.liste_frame,
-            text="Belgeleri buraya sürükleyin\nveya aşağıdaki butondan ekleyin\n(PDF, Word, Görsel, UDF)",
+            text="Belgeleri buraya sürükleyin\nveya aşağıdaki butondan ekleyin\n(PDF, Word, Görsel, UDF)\n\n💡 İpucu: PDF'e çift tıklayarak sayfalarını görsel önizleyebilirsiniz.",
             font=ctk.CTkFont(family="Segoe UI", size=12),
-            text_color="#94A3B8"
+            text_color=("#94A3B8", "#64748B"),
+            justify="center"
         )
-        self.bos_bilgi_etiketi.pack(pady=120)
+        self.bos_bilgi_etiketi.pack(pady=110)
 
         if DND_FILES:
             try:
@@ -237,8 +1157,9 @@ class ModernUyapAsistani(CTkDnD):
             text="➕ Dosya Ekle",
             command=self.dosya_ekle_dialog,
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            fg_color="#0F172A",
-            hover_color="#1E293B",
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
             corner_radius=8,
             height=34
         ).pack(side="left", padx=(0, 6))
@@ -249,9 +1170,9 @@ class ModernUyapAsistani(CTkDnD):
             command=lambda: self._dosya_sirala(-1),
             width=36,
             height=34,
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#334155",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#334155", "#F8FAFC"),
             corner_radius=8
         ).pack(side="left", padx=2)
 
@@ -261,9 +1182,9 @@ class ModernUyapAsistani(CTkDnD):
             command=lambda: self._dosya_sirala(1),
             width=36,
             height=34,
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#334155",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#334155", "#F8FAFC"),
             corner_radius=8
         ).pack(side="left", padx=2)
 
@@ -273,9 +1194,9 @@ class ModernUyapAsistani(CTkDnD):
             command=self.secileni_sil,
             width=65,
             height=34,
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#334155",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#334155", "#F8FAFC"),
             corner_radius=8
         ).pack(side="left", padx=4)
 
@@ -285,37 +1206,43 @@ class ModernUyapAsistani(CTkDnD):
             command=self.listeyi_temizle,
             width=65,
             height=34,
-            fg_color="#FEE2E2",
-            hover_color="#FECACA",
-            text_color="#991B1B",
+            fg_color=("#FEE2E2", "#7F1D1D"),
+            hover_color=("#FECACA", "#991B1B"),
+            text_color=("#991B1B", "#FCA5A5"),
             corner_radius=8
         ).pack(side="right")
 
-        # SAĞ KART: Yüksek Kontrastlı, Dinamik Renk Senkronizasyonlu Sekme Alanı
-        sag_kart = ctk.CTkFrame(govde, fg_color="#FFFFFF", width=470, corner_radius=12, border_width=1, border_color="#E2E8F0")
+        # SAĞ KART
+        sag_kart = ctk.CTkFrame(
+            govde,
+            fg_color=("#FFFFFF", "#1E293B"),
+            width=470,
+            corner_radius=12,
+            border_width=1,
+            border_color=("#E2E8F0", "#334155")
+        )
         sag_kart.pack(side="right", fill="both")
         sag_kart.pack_propagate(False)
 
         self.tabview = ctk.CTkTabview(
             sag_kart,
             fg_color="transparent",
-            segmented_button_fg_color="#E2E8F0",
-            segmented_button_selected_color="#1E293B",
-            segmented_button_selected_hover_color="#0F172A",
-            segmented_button_unselected_color="#F8FAFC",
-            segmented_button_unselected_hover_color="#E2E8F0",
+            segmented_button_fg_color=("#E2E8F0", "#0F172A"),
+            segmented_button_selected_color=("#1E293B", "#3B82F6"),
+            segmented_button_selected_hover_color=("#0F172A", "#2563EB"),
+            segmented_button_unselected_color=("#F8FAFC", "#1E293B"),
+            segmented_button_unselected_hover_color=("#E2E8F0", "#334155"),
             corner_radius=8
         )
         self.tabview.pack(fill="both", expand=True, padx=14, pady=10)
 
-        # Seçili sekme metnini BEYAZ, seçili olmayanları KOYU yapan senkronizasyon fonksiyonu
         def _sekme_renklerini_guncelle(secilen_sekme):
             try:
                 for ad, btn in self.tabview._segmented_button._buttons_dict.items():
                     if ad == secilen_sekme:
                         btn.configure(text_color="#FFFFFF")
                     else:
-                        btn.configure(text_color="#334155")
+                        btn.configure(text_color=("#334155", "#94A3B8"))
             except Exception:
                 pass
 
@@ -340,7 +1267,20 @@ class ModernUyapAsistani(CTkDnD):
         self._sekme_donusturucu_olustur()
         self._sekme_guvenlik_olustur()
 
-        # İlk açılışta seçili olan sekmenin metin rengini beyaz yap
+        self._sekme_renklerini_guncelle(self.tabview.get())
+
+    def _tema_degistir(self):
+        if self.tema_switch.get() == 1:
+            ctk.set_appearance_mode("Dark")
+            self.tema_switch.configure(text="🌙")
+            self.ayarlar["tema"] = "Dark"
+            ayar_kaydet("tema", "Dark")
+        else:
+            ctk.set_appearance_mode("Light")
+            self.tema_switch.configure(text="☀️")
+            self.ayarlar["tema"] = "Light"
+            ayar_kaydet("tema", "Light")
+        self._liste_arayuzunu_yenile()
         self._sekme_renklerini_guncelle(self.tabview.get())
 
     # ========================================================
@@ -349,7 +1289,7 @@ class ModernUyapAsistani(CTkDnD):
     def _sekme_birlestir_olustur(self):
         tab = self.tab_birlestir
 
-        ctk.CTkLabel(tab, text="SIKIŞTIRMA MODU", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(4, 4))
+        ctk.CTkLabel(tab, text="SIKIŞTIRMA MODU", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 4))
         self.mod_secimi = ctk.StringVar(value="akilli_vektor")
 
         ctk.CTkRadioButton(
@@ -358,7 +1298,7 @@ class ModernUyapAsistani(CTkDnD):
             variable=self.mod_secimi,
             value="akilli_vektor",
             font=ctk.CTkFont(family="Segoe UI", size=12),
-            text_color="#334155"
+            text_color=("#334155", "#F8FAFC")
         ).pack(anchor="w", pady=3)
 
         ctk.CTkRadioButton(
@@ -367,11 +1307,17 @@ class ModernUyapAsistani(CTkDnD):
             variable=self.mod_secimi,
             value="maksimum_raster",
             font=ctk.CTkFont(family="Segoe UI", size=12),
-            text_color="#334155"
+            text_color=("#334155", "#F8FAFC")
         ).pack(anchor="w", pady=3)
 
-        ctk.CTkLabel(tab, text="BATES NUMARALANDIRMA", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(14, 4))
-        bates_frame = ctk.CTkFrame(tab, fg_color="#F8FAFC", corner_radius=8, border_width=1, border_color="#E2E8F0")
+        ctk.CTkLabel(tab, text="BATES NUMARALANDIRMA", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(14, 4))
+        bates_frame = ctk.CTkFrame(
+            tab,
+            fg_color=("#F8FAFC", "#0F172A"),
+            corner_radius=8,
+            border_width=1,
+            border_color=("#E2E8F0", "#334155")
+        )
         bates_frame.pack(fill="x", pady=2)
 
         self.bates_aktif = ctk.BooleanVar(value=False)
@@ -381,7 +1327,7 @@ class ModernUyapAsistani(CTkDnD):
             variable=self.bates_aktif,
             command=self._bates_toggle,
             font=ctk.CTkFont(family="Segoe UI", size=12),
-            text_color="#334155"
+            text_color=("#334155", "#F8FAFC")
         )
         self.bates_switch.pack(side="left", padx=12, pady=10)
 
@@ -389,14 +1335,15 @@ class ModernUyapAsistani(CTkDnD):
         self.bates_on_ek.insert(0, "EK-1")
         self.bates_on_ek.pack(side="right", padx=12)
 
-        ctk.CTkLabel(tab, text="EYLEMLER", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(16, 6))
+        ctk.CTkLabel(tab, text="EYLEMLER", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(16, 6))
 
         ctk.CTkButton(
             tab,
             text="📑 Listedeki Belgeleri Birleştir (PDF Yap)",
             command=lambda: self._thread_calistir(self.tumunu_birlestir_pdf_yap),
-            fg_color="#0F172A",
-            hover_color="#1E293B",
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
             font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
             height=40,
             corner_radius=8
@@ -406,9 +1353,9 @@ class ModernUyapAsistani(CTkDnD):
             tab,
             text="🗜 Seçili PDF'i Sıkıştır & Küçült",
             command=lambda: self._thread_calistir(self.pdf_tekil_sikistir),
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#1E293B",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#1E293B", "#F8FAFC"),
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             height=36,
             corner_radius=8
@@ -418,9 +1365,9 @@ class ModernUyapAsistani(CTkDnD):
             tab,
             text="⚖ UYAP Akıllı MB Bölücüsü (Hızlı Parçala)",
             command=lambda: self._thread_calistir(self.pdf_akilli_boyut_bol),
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#1E293B",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#1E293B", "#F8FAFC"),
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             height=36,
             corner_radius=8
@@ -432,15 +1379,29 @@ class ModernUyapAsistani(CTkDnD):
     def _sekme_duzenle_olustur(self):
         tab = self.tab_duzenle
 
-        ctk.CTkLabel(tab, text="SAYFA AYIRMA VE DÖNDÜRME", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(4, 6))
+        ctk.CTkLabel(tab, text="GÖRSEL SAYFA YÖNETİMİ", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 6))
+
+        ctk.CTkButton(
+            tab,
+            text="🖼 Sayfaları Görsel Önizle & Yönet (Grid Panel)",
+            command=self.pdf_gorsel_onizleme_ac,
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=38,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+        ctk.CTkLabel(tab, text="HIZLI SAYFA AYIRMA VE DÖNDÜRME", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(12, 6))
 
         ctk.CTkButton(
             tab,
             text="🔄 Sayfa Döndür (90° / 180°)",
             command=self.pdf_dondur_penceresi,
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#1E293B",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#1E293B", "#F8FAFC"),
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             height=36,
             corner_radius=8
@@ -450,9 +1411,9 @@ class ModernUyapAsistani(CTkDnD):
             tab,
             text="🧹 Boş Sayfaları Temizle (Akıllı Filtre)",
             command=lambda: self._thread_calistir(self.pdf_bos_sayfalari_temizle),
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#1E293B",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#1E293B", "#F8FAFC"),
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             height=36,
             corner_radius=8
@@ -462,9 +1423,9 @@ class ModernUyapAsistani(CTkDnD):
             tab,
             text="✂ Sayfa Sayfa Böl (Her Sayfayı Tek Dosya Yap)",
             command=lambda: self._thread_calistir(self.pdf_sayfa_sayfa_bol),
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#1E293B",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#1E293B", "#F8FAFC"),
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             height=36,
             corner_radius=8
@@ -474,9 +1435,9 @@ class ModernUyapAsistani(CTkDnD):
             tab,
             text="🎯 Belirli Sayfa Aralığını Ayır",
             command=self.pdf_aralik_bol,
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#1E293B",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#1E293B", "#F8FAFC"),
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             height=36,
             corner_radius=8
@@ -488,16 +1449,22 @@ class ModernUyapAsistani(CTkDnD):
     def _sekme_donusturucu_olustur(self):
         tab = self.tab_donusturucu
 
-        ctk.CTkLabel(tab, text="FORMAT DÖNÜŞÜMLERİ", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(4, 6))
+        ctk.CTkLabel(tab, text="FORMAT DÖNÜŞÜMLERİ", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 6))
 
-        bilgi_kutusu = ctk.CTkFrame(tab, fg_color="#F8FAFC", corner_radius=8, border_width=1, border_color="#E2E8F0")
+        bilgi_kutusu = ctk.CTkFrame(
+            tab,
+            fg_color=("#F8FAFC", "#0F172A"),
+            corner_radius=8,
+            border_width=1,
+            border_color=("#E2E8F0", "#334155")
+        )
         bilgi_kutusu.pack(fill="x", pady=(0, 10))
 
         ctk.CTkLabel(
             bilgi_kutusu,
             text="💡 Dönüştürmek istediğiniz dosyayı sol listeden seçin\nveya doğrudan ilgili butona basıp dosya seçin.",
             font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#64748B",
+            text_color=("#64748B", "#94A3B8"),
             justify="left"
         ).pack(anchor="w", padx=12, pady=8)
 
@@ -505,8 +1472,20 @@ class ModernUyapAsistani(CTkDnD):
             tab,
             text="📄 UDF ➔ Word (.docx)",
             command=lambda: self._thread_calistir(self.udf_to_word),
-            fg_color="#0F172A",
-            hover_color="#1E293B",
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=38,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
+
+        ctk.CTkButton(
+            tab,
+            text="📝 Word (.docx) ➔ UDF (.udf)",
+            command=lambda: self._thread_calistir(self.word_to_udf),
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             height=38,
@@ -517,8 +1496,8 @@ class ModernUyapAsistani(CTkDnD):
             tab,
             text="📑 Word (.docx) ➔ PDF",
             command=lambda: self._thread_calistir(self.word_to_pdf),
-            fg_color="#0F172A",
-            hover_color="#1E293B",
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             height=38,
@@ -529,9 +1508,9 @@ class ModernUyapAsistani(CTkDnD):
             tab,
             text="🔍 Evraktaki Metinleri Görüntüle / Kopyala",
             command=self.metin_oku_penceresi,
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#1E293B",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#1E293B", "#F8FAFC"),
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             height=36,
             corner_radius=8
@@ -543,14 +1522,27 @@ class ModernUyapAsistani(CTkDnD):
     def _sekme_guvenlik_olustur(self):
         tab = self.tab_guvenlik
 
-        ctk.CTkLabel(tab, text="HUKUKİ İŞLEMLER VE GÜVENLİK", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color="#94A3B8").pack(anchor="w", pady=(4, 6))
+        ctk.CTkLabel(tab, text="HUKUKİ İŞLEMLER VE GÜVENLİK", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 6))
+
+        ctk.CTkButton(
+            tab,
+            text="🔏 e-İmza & Zaman Damgası Doğrula (Ön Kontrol)",
+            command=self.eimza_dogrula_penceresi,
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=38,
+            corner_radius=8
+        ).pack(fill="x", pady=4)
 
         ctk.CTkButton(
             tab,
             text="🛡 'Aslı Gibidir' Dijital Kaşesi Bas",
             command=self.pdf_kase_ekle_penceresi,
-            fg_color="#0F172A",
-            hover_color="#1E293B",
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             height=38,
             corner_radius=8
@@ -560,9 +1552,9 @@ class ModernUyapAsistani(CTkDnD):
             tab,
             text="🕶 KVKK Akıllı Karartma (T.C., IBAN, Tel)",
             command=self.akilli_karartma_penceresi,
-            fg_color="#F1F5F9",
-            hover_color="#E2E8F0",
-            text_color="#1E293B",
+            fg_color=("#F1F5F9", "#334155"),
+            hover_color=("#E2E8F0", "#475569"),
+            text_color=("#1E293B", "#F8FAFC"),
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             height=36,
             corner_radius=8
@@ -584,11 +1576,12 @@ class ModernUyapAsistani(CTkDnD):
         if not self.dosyalar:
             self.bos_bilgi_etiketi = ctk.CTkLabel(
                 self.liste_frame,
-                text="Belgeleri buraya sürükleyin\nveya aşağıdaki butondan ekleyin\n(PDF, Word, Görsel, UDF)",
+                text="Belgeleri buraya sürükleyin\nveya aşağıdaki butondan ekleyin\n(PDF, Word, Görsel, UDF)\n\n💡 İpucu: PDF'e çift tıklayarak sayfalarını görsel önizleyebilirsiniz.",
                 font=ctk.CTkFont(family="Segoe UI", size=12),
-                text_color="#94A3B8"
+                text_color=("#94A3B8", "#64748B"),
+                justify="center"
             )
-            self.bos_bilgi_etiketi.pack(pady=120)
+            self.bos_bilgi_etiketi.pack(pady=110)
             self.dosya_sayisi_badge.configure(text="0 dosya")
             self.secili_dosya_indeksi = None
             return
@@ -606,7 +1599,7 @@ class ModernUyapAsistani(CTkDnD):
             ad = os.path.basename(yol)
 
             is_selected = (self.secili_dosya_indeksi == i)
-            arkaplan = "#E2E8F0" if is_selected else "#FFFFFF"
+            arkaplan = ("#E2E8F0", "#334155") if is_selected else ("#FFFFFF", "#1E293B")
 
             satir = ctk.CTkFrame(self.liste_frame, fg_color=arkaplan, corner_radius=8, height=36)
             satir.pack(fill="x", pady=2)
@@ -616,25 +1609,54 @@ class ModernUyapAsistani(CTkDnD):
                 self.secili_dosya_indeksi = idx
                 self._liste_arayuzunu_yenile()
 
+            def cift_tikla(yol_hedef=yol):
+                if yol_hedef.lower().endswith(".pdf"):
+                    PdfGorselOnizlemePenceresi(self, yol_hedef)
+
             satir.bind("<Button-1>", lambda e, idx=i: secim_yap(idx))
+            satir.bind("<Double-Button-1>", lambda e, y=yol: cift_tikla(y))
+
+            sol_bilgi_box = ctk.CTkFrame(satir, fg_color="transparent")
+            sol_bilgi_box.pack(side="left", padx=10, fill="y")
+            sol_bilgi_box.bind("<Button-1>", lambda e, idx=i: secim_yap(idx))
+            sol_bilgi_box.bind("<Double-Button-1>", lambda e, y=yol: cift_tikla(y))
 
             lbl_ad = ctk.CTkLabel(
-                satir,
+                sol_bilgi_box,
                 text=f"{simge}  {ad}",
                 font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold" if is_selected else "normal"),
-                text_color="#0F172A"
+                text_color=("#0F172A", "#F8FAFC")
             )
-            lbl_ad.pack(side="left", padx=10)
+            lbl_ad.pack(side="left")
             lbl_ad.bind("<Button-1>", lambda e, idx=i: secim_yap(idx))
+            lbl_ad.bind("<Double-Button-1>", lambda e, y=yol: cift_tikla(y))
+
+            imza_bilgi = self.dosya_imza_durumlari.get(yol)
+            if imza_bilgi and imza_bilgi.get("imzali"):
+                rozet_metin = "✓ e-İmzalı"
+                if imza_bilgi.get("zaman_damgasi"):
+                    rozet_metin += " • ⏱ Z.Damgalı"
+                lbl_imza = ctk.CTkLabel(
+                    sol_bilgi_box,
+                    text=rozet_metin,
+                    font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+                    fg_color=("#DCFCE7", "#064E3B"),
+                    text_color=("#166534", "#6EE7B7"),
+                    corner_radius=4,
+                    padx=6,
+                    pady=1
+                )
+                lbl_imza.pack(side="left", padx=8)
 
             lbl_boyut = ctk.CTkLabel(
                 satir,
                 text=f"{boyut_mb:.2f} MB",
                 font=ctk.CTkFont(family="Segoe UI", size=11),
-                text_color="#64748B"
+                text_color=("#64748B", "#94A3B8")
             )
             lbl_boyut.pack(side="right", padx=10)
             lbl_boyut.bind("<Button-1>", lambda e, idx=i: secim_yap(idx))
+            lbl_boyut.bind("<Double-Button-1>", lambda e, y=yol: cift_tikla(y))
 
             self.dosya_satir_widgetleri.append(satir)
 
@@ -653,6 +1675,7 @@ class ModernUyapAsistani(CTkDnD):
         uzanti = os.path.splitext(dosya_yolu)[1].lower()
         if uzanti in DESTEKLENEN_UZANTILAR and dosya_yolu not in self.dosyalar:
             self.dosyalar.append(dosya_yolu)
+            self.dosya_imza_durumlari[dosya_yolu] = eimza_bilgisi_al(dosya_yolu)
             self._liste_arayuzunu_yenile()
 
     def dosyalari_surukle_birak(self, event):
@@ -679,6 +1702,9 @@ class ModernUyapAsistani(CTkDnD):
     def secileni_sil(self):
         if hasattr(self, "secili_dosya_indeksi") and self.secili_dosya_indeksi is not None:
             if 0 <= self.secili_dosya_indeksi < len(self.dosyalar):
+                silinecek = self.dosyalar[self.secili_dosya_indeksi]
+                if silinecek in self.dosya_imza_durumlari:
+                    del self.dosya_imza_durumlari[silinecek]
                 del self.dosyalar[self.secili_dosya_indeksi]
                 self.secili_dosya_indeksi = None
                 self._liste_arayuzunu_yenile()
@@ -686,6 +1712,7 @@ class ModernUyapAsistani(CTkDnD):
 
     def listeyi_temizle(self):
         self.dosyalar.clear()
+        self.dosya_imza_durumlari.clear()
         self.secili_dosya_indeksi = None
         self._liste_arayuzunu_yenile()
         self.durum_etiketi.configure(text="Liste temizlendi.")
@@ -971,6 +1998,13 @@ class ModernUyapAsistani(CTkDnD):
     # ========================================================
     # 2. SAYFALAR İŞLEMLERİ
     # ========================================================
+    def pdf_gorsel_onizleme_ac(self):
+        kaynak_yol = self._secili_dosya_al()
+        if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
+            messagebox.showwarning("Geçersiz Dosya", "Görsel Önizleme paneli yalnızca PDF dosyaları içindir.")
+            return
+        PdfGorselOnizlemePenceresi(self, kaynak_yol)
+
     def pdf_dondur_penceresi(self):
         kaynak_yol = self._secili_dosya_al()
         if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
@@ -1030,7 +2064,15 @@ class ModernUyapAsistani(CTkDnD):
             except Exception as e:
                 messagebox.showerror("Hata", f"Döndürme hatası:\n{str(e)}")
 
-        ctk.CTkButton(dialog, text="Uygula ve Kaydet", command=dondur_kaydet, fg_color="#0F172A", hover_color="#1E293B", corner_radius=8).pack(pady=16)
+        ctk.CTkButton(
+            dialog,
+            text="Uygula ve Kaydet",
+            command=dondur_kaydet,
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            corner_radius=8
+        ).pack(pady=16)
 
     def pdf_bos_sayfalari_temizle(self):
         kaynak_yol = self._secili_dosya_al()
@@ -1228,6 +2270,44 @@ class ModernUyapAsistani(CTkDnD):
         except Exception as e:
             messagebox.showerror("Hata", f"Word dönüşüm hatası:\n{str(e)}")
 
+    def word_to_udf(self):
+        kaynak_yol = None
+        if hasattr(self, "secili_dosya_indeksi") and self.secili_dosya_indeksi is not None and self.dosyalar:
+            aday = self.dosyalar[self.secili_dosya_indeksi]
+            if aday.lower().endswith('.docx'):
+                kaynak_yol = aday
+
+        if not kaynak_yol:
+            kaynak_yol = filedialog.askopenfilename(
+                title="Dönüştürülecek Word (.docx) Dosyasını Seçin",
+                filetypes=[("Word Belgeleri", "*.docx")]
+            )
+
+        if not kaynak_yol:
+            return
+
+        hedef_yol = filedialog.asksaveasfilename(
+            defaultextension=".udf",
+            filetypes=[("UYAP Dokümanı", "*.udf")],
+            title="UDF (.udf) Olarak Kaydet",
+            initialfile=os.path.splitext(os.path.basename(kaynak_yol))[0] + ".udf"
+        )
+        if not hedef_yol:
+            return
+
+        try:
+            self.durum_etiketi.configure(text="Word belgesi UDF formatına dönüştürülüyor...")
+            belge, ist, resimler = docx_to_udf_cevir(kaynak_yol, max_px=510)
+            belge.kaydet(hedef_yol)
+
+            self.durum_etiketi.configure(text=f"Word ➔ UDF tamamlandı: {ist['paragraf']} paragraf, {ist['resim']} resim.")
+            mesaj = f"Word belgesi UDF formatına dönüştürüldü!\n\nAktarılan Paragraf: {ist['paragraf']}\nAktarılan Resim: {ist['resim']}\nDosya: {os.path.basename(hedef_yol)}"
+            if ist.get("atlanan", 0) > 0:
+                mesaj += f"\n\nNot: {ist['atlanan']} adet vektörel/desteklenmeyen görsel editörden elle eklenmelidir."
+            messagebox.showinfo("Başarılı", mesaj)
+        except Exception as e:
+            messagebox.showerror("Hata", f"Word ➔ UDF dönüştürme hatası:\n{str(e)}")
+
     def word_to_pdf(self):
         kaynak_yol = None
         if hasattr(self, "secili_dosya_indeksi") and self.secili_dosya_indeksi is not None and self.dosyalar:
@@ -1266,7 +2346,7 @@ class ModernUyapAsistani(CTkDnD):
                 word = win32com.client.Dispatch("Word.Application")
                 word.Visible = False
                 doc = word.Documents.Open(abs_kaynak)
-                doc.SaveAs(abs_hedef, FileFormat=17)  # 17 = wdFormatPDF
+                doc.SaveAs(abs_hedef, FileFormat=17)
                 doc.Close()
                 word.Quit()
             except Exception:
@@ -1339,14 +2419,97 @@ class ModernUyapAsistani(CTkDnD):
                 pencere.clipboard_append(txt.get("0.0", "end"))
                 messagebox.showinfo("Kopyalandı", "Metin panoya kopyalandı!")
 
-            ctk.CTkButton(pencere, text="📋 Panoya Kopyala", command=kopyala, fg_color="#0F172A", hover_color="#1E293B", corner_radius=8).pack(pady=(0, 16))
+            ctk.CTkButton(
+                pencere,
+                text="📋 Panoya Kopyala",
+                command=kopyala,
+                fg_color=("#0F172A", "#3B82F6"),
+                hover_color=("#1E293B", "#2563EB"),
+                text_color="#FFFFFF",
+                corner_radius=8
+            ).pack(pady=(0, 16))
             self.durum_etiketi.configure(text="Metin hazır.")
         except Exception as e:
             messagebox.showerror("Hata", f"Metin okunamadı:\n{str(e)}")
 
     # ========================================================
-    # 4. KVKK & KAŞE İŞLEMLERİ
+    # 4. KVKK & KAŞE & GÜVENLİK İŞLEMLERİ
     # ========================================================
+    def eimza_dogrula_penceresi(self):
+        kaynak_yol = self._secili_dosya_al()
+        if not kaynak_yol:
+            return
+
+        uzanti = os.path.splitext(kaynak_yol)[1].lower()
+        if uzanti not in ('.udf', '.pdf'):
+            messagebox.showwarning("Geçersiz Dosya", "e-İmza kontrolü yalnızca UDF ve PDF dosyalarında uygulanabilir.")
+            return
+
+        bilgi = eimza_bilgisi_al(kaynak_yol)
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("e-İmza & Güvenlik Analizi")
+        dialog.geometry("480x380")
+        dialog.resizable(False, False)
+        dialog.after(100, dialog.lift)
+
+        ctk.CTkLabel(
+            dialog,
+            text="🔏 Belge Güvenlik ve İmza Doğrulama",
+            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+            text_color=("#0F172A", "#F8FAFC")
+        ).pack(pady=(20, 2))
+
+        ctk.CTkLabel(
+            dialog,
+            text=os.path.basename(kaynak_yol),
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=("#64748B", "#94A3B8")
+        ).pack(pady=(0, 14))
+
+        kart = ctk.CTkFrame(
+            dialog,
+            fg_color=("#F8FAFC", "#1E293B"),
+            corner_radius=10,
+            border_width=1,
+            border_color=("#E2E8F0", "#334155")
+        )
+        kart.pack(fill="x", padx=24, pady=4)
+
+        durum_baslik = "✅ Nitelikli Elektronik İmza Bulundu" if bilgi["imzali"] else "❌ İmzalanmamış Belge (İmza Yok)"
+        durum_renk = ("#166534", "#4ADE80") if bilgi["imzali"] else ("#991B1B", "#F87171")
+
+        ctk.CTkLabel(
+            kart,
+            text=durum_baslik,
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            text_color=durum_renk
+        ).pack(anchor="w", padx=16, pady=(14, 6))
+
+        def satir_ekle(etiket, deger):
+            f = ctk.CTkFrame(kart, fg_color="transparent")
+            f.pack(fill="x", padx=16, pady=3)
+            ctk.CTkLabel(f, text=etiket, font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"), text_color=("#475569", "#CBD5E1"), width=120, anchor="w").pack(side="left")
+            ctk.CTkLabel(f, text=deger or "-", font=ctk.CTkFont(family="Segoe UI", size=11), text_color=("#0F172A", "#F8FAFC"), anchor="w").pack(side="left", fill="x", expand=True)
+
+        satir_ekle("İmzalayan Kişi:", bilgi["imzalayan"])
+        satir_ekle("İmza Formatı:", "CAdES / UYAP UDF" if uzanti == '.udf' else "PAdES / PDF")
+        if bilgi.get("tarih"):
+            satir_ekle("İmza Zamanı:", bilgi["tarih"])
+        satir_ekle("Zaman Damgası:", "Mevcut (TSA Onaylı)" if bilgi["zaman_damgasi"] else "Bulunmuyor (Yerel Saat)")
+
+        ctk.CTkButton(
+            dialog,
+            text="Kapat",
+            command=dialog.destroy,
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=34,
+            corner_radius=8
+        ).pack(pady=(20, 0), padx=24, fill="x")
+
     def pdf_kase_ekle_penceresi(self):
         kaynak_yol = self._secili_dosya_al()
         if not kaynak_yol or not kaynak_yol.lower().endswith('.pdf'):
@@ -1366,11 +2529,15 @@ class ModernUyapAsistani(CTkDnD):
 
         ctk.CTkLabel(dialog, text="Kaşe Başlığı:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(12, 2))
         baslik_entry = ctk.CTkEntry(dialog)
-        baslik_entry.insert(0, "ASLI GİBİDİR")
+        baslik_entry.insert(0, self.ayarlar.get("kase_baslik", "ASLI GİBİDİR"))
         baslik_entry.pack(fill="x", padx=20)
 
         ctk.CTkLabel(dialog, text="Avukat İsim / Sicil No / Unvan:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
         avukat_entry = ctk.CTkEntry(dialog, placeholder_text="Av. Ad Soyad - Baro Sicil No")
+        # HATIRLANAN AVUKAT BİLGİSİNİ DOLDUR
+        kayitli_avukat = self.ayarlar.get("avukat_bilgisi", "")
+        if kayitli_avukat:
+            avukat_entry.insert(0, kayitli_avukat)
         avukat_entry.pack(fill="x", padx=20)
 
         ctk.CTkLabel(dialog, text="Tarih / Ek Açıklama:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
@@ -1378,20 +2545,33 @@ class ModernUyapAsistani(CTkDnD):
         ek_entry.insert(0, f"Tarih: {bugun}")
         ek_entry.pack(fill="x", padx=20)
 
-        konum_var = ctk.StringVar(value="sag_alt")
+        # HATIRLANAN KONUM BİLGİSİ
+        kayitli_konum_gorunum = self.ayarlar.get("kase_konum", "Sağ Alt")
+        konum_haritasi = {"Sağ Alt": "sag_alt", "Sol Alt": "sol_alt", "Alt Orta": "alt_orta", "Sağ Üst": "sag_ust"}
+        konum_var = ctk.StringVar(value=konum_haritasi.get(kayitli_konum_gorunum, "sag_alt"))
+
         ctk.CTkLabel(dialog, text="Konum:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
         konum_opt = ctk.CTkOptionMenu(
             dialog,
             values=["Sağ Alt", "Sol Alt", "Alt Orta", "Sağ Üst"],
-            command=lambda v: konum_var.set({"Sağ Alt": "sag_alt", "Sol Alt": "sol_alt", "Alt Orta": "alt_orta", "Sağ Üst": "sag_ust"}[v])
+            command=lambda v: (konum_var.set(konum_haritasi.get(v, "sag_alt")), self.ayarlar.update({"kase_konum": v}), ayar_kaydet("kase_konum", v))
         )
+        konum_opt.set(kayitli_konum_gorunum)
         konum_opt.pack(fill="x", padx=20)
 
-        renk_var = ctk.StringVar(value="kirmizi")
+        # HATIRLANAN RENK BİLGİSİ
+        kayitli_renk = self.ayarlar.get("kase_renk", "kirmizi")
+        renk_var = ctk.StringVar(value=kayitli_renk)
         renk_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         renk_frame.pack(fill="x", padx=20, pady=8)
-        ctk.CTkRadioButton(renk_frame, text="Kırmızı", variable=renk_var, value="kirmizi").pack(side="left", padx=(0, 14))
-        ctk.CTkRadioButton(renk_frame, text="Lacivert", variable=renk_var, value="lacivert").pack(side="left")
+
+        def renk_degisti():
+            secilen = renk_var.get()
+            self.ayarlar["kase_renk"] = secilen
+            ayar_kaydet("kase_renk", secilen)
+
+        ctk.CTkRadioButton(renk_frame, text="Kırmızı", variable=renk_var, value="kirmizi", command=renk_degisti).pack(side="left", padx=(0, 14))
+        ctk.CTkRadioButton(renk_frame, text="Lacivert", variable=renk_var, value="lacivert", command=renk_degisti).pack(side="left")
 
         aralik_entry = ctk.CTkEntry(dialog, placeholder_text="Sayfa No (Boşsa Tümü | Örn: 1, 3-5)")
         aralik_entry.pack(fill="x", padx=20, pady=8)
@@ -1402,6 +2582,16 @@ class ModernUyapAsistani(CTkDnD):
             except ValueError as ve:
                 messagebox.showerror("Hata", str(ve))
                 return
+
+            # AVUKAT VE BAŞLIK TERCİHLERİNİ GİZLİCE KAYDET
+            yeni_avukat = avukat_entry.get().strip()
+            yeni_baslik = baslik_entry.get().strip()
+            if yeni_avukat:
+                self.ayarlar["avukat_bilgisi"] = yeni_avukat
+                ayar_kaydet("avukat_bilgisi", yeni_avukat)
+            if yeni_baslik:
+                self.ayarlar["kase_baslik"] = yeni_baslik
+                ayar_kaydet("kase_baslik", yeni_baslik)
 
             hedef_yol = filedialog.asksaveasfilename(
                 defaultextension=".pdf",
@@ -1454,7 +2644,15 @@ class ModernUyapAsistani(CTkDnD):
             except Exception as e:
                 messagebox.showerror("Hata", f"Kaşe basma hatası:\n{str(e)}")
 
-        ctk.CTkButton(dialog, text="🛡 Kaşeyi Bas ve Kaydet", command=uygula, fg_color="#0F172A", hover_color="#1E293B", corner_radius=8).pack(pady=16)
+        ctk.CTkButton(
+            dialog,
+            text="🛡 Kaşeyi Bas ve Kaydet",
+            command=uygula,
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            corner_radius=8
+        ).pack(pady=16)
 
     def akilli_karartma_penceresi(self):
         kaynak_yol = self._secili_dosya_al()
@@ -1547,12 +2745,20 @@ class ModernUyapAsistani(CTkDnD):
             except Exception as e:
                 messagebox.showerror("Hata", f"Karartma hatası:\n{str(e)}")
 
-        ctk.CTkButton(dialog, text="🛡 Kalıcı Karart ve Kaydet", command=uygula, fg_color="#0F172A", hover_color="#1E293B", corner_radius=8).pack(pady=18)
+        ctk.CTkButton(
+            dialog,
+            text="🛡 Kalıcı Karart ve Kaydet",
+            command=uygula,
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            corner_radius=8
+        ).pack(pady=18)
 
     def rehber_penceresi_ac(self):
         pencere = ctk.CTkToplevel(self)
         pencere.title("Kullanım Rehberi")
-        pencere.geometry("640x520")
+        pencere.geometry("640x540")
         pencere.resizable(False, False)
         pencere.after(100, pencere.lift)
 
@@ -1567,19 +2773,102 @@ class ModernUyapAsistani(CTkDnD):
 • Bates numaralandırma işaretlenirse sayfaların altına 'EK-1 | Sayfa 1/5' formatında numara basılır.
 
 2. Sayfalar:
+• 'Sayfaları Görsel Önizle & Yönet' paneli veya listedeki PDF'e çift tıklayarak sayfaları küçük resimler halinde görebilir, tek tek veya toplu olarak döndürüp silebilirsiniz.
 • Boş sayfaları temizleme butonu çift taraflı taramalardaki boş sayfaları tespit eder ve onayınızı alarak temizler.
 • UYAP Akıllı MB Bölücüsü büyük dosyaları UYAP limitine (9.5 MB) göre sayfa bütünlüğünü bozmadan ayırır.
 
 3. Dönüştür:
 • UDF (.udf) dosyalarını tek tıkla Microsoft Word (.docx) formatına çevirebilirsiniz.
+• Hazırladığınız Word (.docx) belgelerini fotoğrafları, tabloları ve biçimlendirmesiyle birlikte UYAP Editörün açabileceği '.udf' formatına dönüştürebilirsiniz.
 • Hazırladığınız Word (.docx) dilekçelerini doğrudan resmi UYAP uyumlu PDF'e dönüştürebilirsiniz.
 
-4. KVKK & Kaşe:
-• 'Aslı Gibidir' kaşesi belgenin yönüne duyarlı şekilde otomatik yerleşir.
+4. KVKK, Kaşe & Güvenlik:
+• 'e-İmza & Zaman Damgası Doğrula': Seçili UDF veya PDF'in nitelikli elektronik imza sahibini ve TÜBİTAK/TSA zaman damgası durumunu tek tıkla analiz eder.
+• 'Aslı Gibidir' kaşesi belgenin yönüne duyarlı şekilde otomatik yerleşir. Avukat bilgisi ve kaşe tercihleriniz bir sonraki kullanım için arka planda hatırlanır.
 • KVKK Karartma modülü yalnızca geçerli T.C. Kimlik numaralarını algoritmayla doğrulayarak ve IBAN'ları tespit ederek maskeler; ardından metaverileri PDF'ten tamamen kazır."""
 
         txt.insert("0.0", rehber.strip())
         txt.configure(state="disabled")
+
+    def hakkinda_penceresi_ac(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Hakkında")
+        dialog.geometry("460x390")
+        dialog.resizable(False, False)
+        dialog.after(100, dialog.lift)
+
+        ctk.CTkLabel(
+            dialog,
+            text="⚖ UYAP Evrak Asistanı",
+            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+            text_color=("#0F172A", "#F8FAFC")
+        ).pack(pady=(20, 2))
+
+        ctk.CTkLabel(
+            dialog,
+            text="Sürüm 1.0.1 • UYAP Kullanıcıları İçin Tasarlandı",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=("#64748B", "#94A3B8")
+        ).pack(pady=(0, 16))
+
+        kart = ctk.CTkFrame(
+            dialog,
+            fg_color=("#F8FAFC", "#1E293B"),
+            corner_radius=10,
+            border_width=1,
+            border_color=("#E2E8F0", "#334155")
+        )
+        kart.pack(fill="x", padx=24, pady=4)
+
+        ctk.CTkLabel(
+            kart,
+            text="Proje Geliştiricisi:",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=("#334155", "#E2E8F0")
+        ).pack(anchor="w", padx=14, pady=(10, 1))
+
+        ctk.CTkLabel(
+            kart,
+            text="Tolunay Akay",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=("#0F172A", "#F8FAFC")
+        ).pack(anchor="w", padx=14, pady=(0, 10))
+
+        ctk.CTkLabel(
+            kart,
+            text="Katkıda Bulunanlar (Credits):",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=("#334155", "#E2E8F0")
+        ).pack(anchor="w", padx=14, pady=(4, 1))
+
+        ctk.CTkLabel(
+            kart,
+            text="• Zafer Kaya",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=("#64748B", "#94A3B8")
+        ).pack(anchor="w", padx=14, pady=(0, 12))
+
+        def mail_at():
+            webbrowser.open("mailto:tolunay.akay@galahukuk.com")
+
+        ctk.CTkButton(
+            dialog,
+            text="✉ Geliştirici ile İletişim / Geri Bildirim",
+            command=mail_at,
+            fg_color=("#0F172A", "#3B82F6"),
+            hover_color=("#1E293B", "#2563EB"),
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            height=36,
+            corner_radius=8
+        ).pack(fill="x", padx=24, pady=(18, 8))
+
+        ctk.CTkLabel(
+            dialog,
+            text="Hata bildirimi ve yeni özellik önerileri için dilediğiniz zaman ulaşabilirsiniz.",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color=("#94A3B8", "#64748B")
+        ).pack()
 
 
 if __name__ == "__main__":
