@@ -30,7 +30,7 @@ MANIFEST
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
-*.spec
+# Not: "UYAP Evrak Asistanı.spec" bilinçli olarak depoya dahildir (sürüm bilgisi ve ai_motor ayarlarını içerir)
 
 # Installer logs
 pip-log.txt
@@ -179,3 +179,5 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# AI motoru (Vulkan) DLL'leri: 'python ai_motor_hazirla.py' ile üretilir
+ai_motor/

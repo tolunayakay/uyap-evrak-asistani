@@ -1,5 +1,6 @@
 customtkinter==6.0.0
 docx2pdf==0.1.8
+llama_cpp_python==0.3.36
 Pillow==12.3.0
 pymupdf==1.28.2
 python_docx==1.2.0
