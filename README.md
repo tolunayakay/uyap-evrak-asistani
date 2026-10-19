@@ -10,7 +10,7 @@
 
 **v2.0.0 ile birlikte** uygulama, evrakları **bilgisayarınızda yerel olarak çalışan bir yapay zekâ** ile özetleyebiliyor. Belgeleriniz hiçbir zaman internete gönderilmez.
 
-<img width="1317" height="836" alt="UYAP Evrak Asistanı" src="https://github.com/user-attachments/assets/c7f01b9b-0492-4ac6-81f0-9d6e46266532" />
+<img width="1471" height="986" alt="1" src="https://github.com/user-attachments/assets/4a49ab53-cea5-490f-b43d-4e6f63306735" />
 
 ---
 
