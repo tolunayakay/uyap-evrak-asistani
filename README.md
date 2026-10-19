@@ -95,7 +95,7 @@
 Uygulama **taşınabilir (portable)** yapıdadır; kurulum, yönetici yetkisi veya ek program gerektirmez.
 
 1. Sağ taraftaki **Releases** sekmesine gidin.
-2. En güncel sürümün altındaki **Assets** bölümünden `UYAP Evrak Asistanı.exe` dosyasını indirin.
+2. En güncel sürümün altındaki **Assets** bölümünden `UYAP.Evrak.Asistani.exe` dosyasını indirin.
 3. Çift tıklayarak doğrudan kullanmaya başlayın.
 
 > İlk açılışta Windows SmartScreen "Windows bilgisayarınızı korudu" uyarısı gösterebilir. **Ek bilgi ➔ Yine de çalıştır** ile açabilirsiniz.
