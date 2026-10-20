@@ -3087,32 +3087,31 @@ class ModernUyapAsistani(CTkDnD):
 
         self._sekme_renklerini_guncelle(self.tabview.get())
 
-    def _tema_degistir(self):
-        # Header switch ile Ayarlar sekmesi switch'ini senkronize et
-        header_acik = self.tema_switch.get() == 1
-        ayarlar_acik = (
-            hasattr(self, "_tema_ayar_switch") and
-            self._tema_ayar_switch.get() == 1
-        )
-        # Hangisinden tetiklendiyse diğerini eşle
-        yeni_dark = header_acik or ayarlar_acik
+    def _tema_degistir(self, kaynak=None):
+        # Hangi switch tetiklediyse onun değeri esas alınır; diğeri ona eşlenir
+        kaynak = kaynak or self.tema_switch
+        yeni_dark = kaynak.get() == 1
+
+        # Ayarlar penceresi kapandıysa switch'i yok edilmiştir; ona dokunulmamalı
+        ayar_switch = getattr(self, "_tema_ayar_switch", None)
+        try:
+            if ayar_switch is not None and not ayar_switch.winfo_exists():
+                ayar_switch = None
+        except tk.TclError:
+            ayar_switch = None
+
+        for sw in (self.tema_switch, ayar_switch):
+            if sw is not None and sw is not kaynak:
+                sw.select() if yeni_dark else sw.deselect()
 
         if yeni_dark:
             ctk.set_appearance_mode("Dark")
             self.tema_switch.configure(text="🌙")
-            if not header_acik:
-                self.tema_switch.select()
-            if hasattr(self, "_tema_ayar_switch") and not ayarlar_acik:
-                self._tema_ayar_switch.select()
             self.ayarlar["tema"] = "Dark"
             ayar_kaydet("tema", "Dark")
         else:
             ctk.set_appearance_mode("Light")
             self.tema_switch.configure(text="☀️")
-            if header_acik:
-                self.tema_switch.deselect()
-            if hasattr(self, "_tema_ayar_switch") and ayarlar_acik:
-                self._tema_ayar_switch.deselect()
             self.ayarlar["tema"] = "Light"
             ayar_kaydet("tema", "Light")
         self._liste_arayuzunu_yenile()
@@ -3270,7 +3269,7 @@ class ModernUyapAsistani(CTkDnD):
             self._tema_ayar_switch = ctk.CTkSwitch(
                 tema_satir,
                 text="",
-                command=self._tema_degistir,
+                command=lambda: self._tema_degistir(self._tema_ayar_switch),
                 width=42,
                 switch_width=36,
                 switch_height=20,
