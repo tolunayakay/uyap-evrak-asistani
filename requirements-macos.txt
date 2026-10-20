@@ -1,0 +1,13 @@
+# macOS (Apple Silicon) bağımlılıkları. Windows için requirements.txt kullanılır.
+#
+# llama_cpp_python kaynak koddan derlenir ve macOS'ta Metal (ekran kartı) desteği
+# otomatik açılır. Derleme için Xcode Command Line Tools gerekir (xcode-select --install).
+# Kurulum:
+#   CMAKE_ARGS="-DGGML_METAL=on" pip install -r requirements-macos.txt
+customtkinter==6.0.0
+docx2pdf==0.1.8
+llama_cpp_python==0.3.36
+Pillow==12.3.0
+pymupdf==1.28.2
+python_docx==1.2.0
+tkinterdnd2==0.6.4

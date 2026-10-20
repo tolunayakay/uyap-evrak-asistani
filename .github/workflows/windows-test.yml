@@ -1,0 +1,101 @@
+# Değişikliklerin Windows'u bozmadığını doğrular (main'e açılan her Pull Request'te çalışır).
+# Aynı testler GitHub'ın Windows sunucusunda hem main hem bu dal üzerinde çalıştırılıp karşılaştırılır,
+# ardından bu daldan Windows .exe derlenip denenir. Sonuç tablosu çalıştırmanın özet sayfasında görünür.
+name: Windows doğrulama
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Bu dalı al
+        uses: actions/checkout@v4
+        with:
+          path: dal
+
+      - name: main dalını al
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: ana
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Windows bağımlılıklarını kur (requirements.txt)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r dal/requirements.txt
+          python -m pip install pyinstaller
+
+      - name: AI modelini önbellekten al
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Roaming\UyapAsistani\models\gemma-4-E2B-it-Q4_K_M.gguf
+          key: gemma-4-E2B-it-Q4_K_M
+
+      - name: AI modelini indir
+        if: steps.model.outputs.cache-hit != 'true'
+        run: |
+          $klasor = "$env:APPDATA\UyapAsistani\models"
+          New-Item -ItemType Directory -Force $klasor | Out-Null
+          curl.exe -fL --retry 5 -o "$klasor\gemma-4-E2B-it-Q4_K_M.gguf" "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"
+
+      - name: Testler - main
+        continue-on-error: true
+        run: python dal/.github/windows-test/windows_test.py ana sonuc/ana
+
+      - name: Testler - bu değişiklik
+        continue-on-error: true
+        run: python dal/.github/windows-test/windows_test.py dal sonuc/dal
+
+      - name: AI özeti - main
+        continue-on-error: true
+        run: python dal/.github/windows-test/ai_test.py ana sonuc/ana/ai.json
+
+      - name: AI özeti - bu değişiklik
+        continue-on-error: true
+        run: python dal/.github/windows-test/ai_test.py dal sonuc/dal/ai.json
+
+      - name: Windows .exe derle (Windows .spec ile)
+        working-directory: dal
+        run: |
+          python ai_motor_hazirla.py
+          python -m PyInstaller --noconfirm "UYAP Evrak Asistanı.spec"
+
+      - name: .exe'yi dene
+        continue-on-error: true
+        run: python dal/.github/windows-test/exe_test.py "dal/dist/UYAP Evrak Asistanı.exe" sonuc/exe
+
+      - name: Karşılaştır
+        run: python dal/.github/windows-test/karsilastir.py sonuc/ana sonuc/dal sonuc/exe/exe_sonuc.json
+
+      - name: Derlenen .exe'yi indirilebilir olarak sakla
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: UYAP-Evrak-Asistani-Windows-exe
+          path: dal/dist/UYAP Evrak Asistanı.exe
+          retention-days: 14
+
+      - name: Sonuçları sakla
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-sonuclari
+          path: |
+            sonuc/**/*.json
+            sonuc/**/*.png
