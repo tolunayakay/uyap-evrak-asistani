@@ -1,0 +1,138 @@
+# Sürüm yayınlama: "v" ile başlayan bir etiket (ör. v2.1.0) gönderildiğinde Windows .exe ve macOS .app
+# derlenir, kısa bir açılış testinden geçirilir ve ikisi TASLAK sürüm olarak Releases'e yüklenir.
+# Taslak, GitHub'da kontrol edildikten sonra elle yayınlanır. main'e açılan Pull Request'lerde veya elle
+# başlatılınca yalnızca derleme ve test yapılır, sürüm oluşturulmaz; dosyalar Artifacts bölümünden indirilebilir.
+name: Sürüm derle ve yayınla
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bağımlılıklar (requirements.txt)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: .exe derle
+        run: |
+          python ai_motor_hazirla.py
+          python -m PyInstaller --noconfirm "UYAP Evrak Asistanı.spec"
+          Copy-Item "dist/UYAP Evrak Asistanı.exe" "UYAP.Evrak.Asistani.exe"
+
+      - name: Açılış ve AI kütüphanesi testi
+        run: |
+          $p = Start-Process -FilePath ".\UYAP.Evrak.Asistani.exe" -ArgumentList "--ai-test", "ai_test.json" -Wait -PassThru
+          $ai = Get-Content ai_test.json -Raw | ConvertFrom-Json
+          if (-not $ai.kutuphane) { throw "AI kütüphanesi yüklenemedi: $($ai.hata)" }
+          $app = Start-Process -FilePath ".\UYAP.Evrak.Asistani.exe" -PassThru
+          Start-Sleep -Seconds 20
+          if ($app.HasExited) { throw "Uygulama açıldıktan sonra kapandı" }
+          Stop-Process -Id $app.Id -Force
+          "Windows .exe tamam (llama-cpp-python $($ai.kutuphane))"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: UYAP.Evrak.Asistani.exe
+
+  macos:
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bağımlılıklar (requirements-macos.txt, AI kütüphanesi Metal ile derlenir)
+        env:
+          CMAKE_ARGS: "-DGGML_METAL=on"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-macos.txt pyinstaller
+          python -c "import llama_cpp; assert llama_cpp.llama_supports_gpu_offload(), 'Metal desteği yok'; print('Metal destekli llama-cpp-python', llama_cpp.__version__)"
+
+      - name: .app derle ve zip'le
+        run: |
+          python -m PyInstaller --noconfirm "UYAP Evrak Asistanı (macOS).spec"
+          ditto -c -k --keepParent "dist/UYAP Evrak Asistanı.app" UYAP.Evrak.Asistani-macOS.zip
+
+      - name: Açılış ve AI kütüphanesi testi
+        run: |
+          B="dist/UYAP Evrak Asistanı.app/Contents/MacOS/UYAP Evrak Asistanı"
+          # Ana programın SDK sürümü eskiyse Metal uyumluluk modunda çalışır ve AI özeti çöker (bkz. .spec)
+          SDK=$(otool -l "$B" | awk '/LC_BUILD_VERSION/{f=1} f&&/sdk/{print $2; exit}')
+          echo "Ana program SDK sürümü: $SDK"
+          [ "${SDK%%.*}" -ge 14 ] || { echo "Ana program SDK sürümü 14'ten eski: $SDK"; exit 1; }
+          codesign --verify --deep --strict "dist/UYAP Evrak Asistanı.app"
+          "$B" --ai-test ai_test.json
+          python -c "import json; d=json.load(open('ai_test.json')); assert d['kutuphane'], d; print('AI kütüphanesi', d['kutuphane'])"
+          "$B" & P=$!
+          sleep 20
+          kill -0 $P || { echo "Uygulama açıldıktan sonra kapandı"; exit 1; }
+          kill $P
+          echo "macOS .app tamam"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: UYAP.Evrak.Asistani-macOS.zip
+
+  taslak-surum:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dosyalar
+          merge-multiple: true
+
+      - name: Etiket ile APP_VERSION aynı mı, sürüm notlarını README'den al
+        run: |
+          python3 - <<'EOF'
+          import os, re, sys
+          etiket = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          kod = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', open("uyap_asistan.py", encoding="utf-8").read(), re.M).group(1)
+          if kod != etiket:
+              sys.exit(f"Etiket v{etiket}, ama uyap_asistan.py içindeki APP_VERSION {kod}. Önce APP_VERSION'ı güncelleyin.")
+          readme = open("README.md", encoding="utf-8").read()
+          m = re.search(rf"^### [^\n]*v{re.escape(etiket)}[^\n]*\n(.*?)(?=^### |^---)", readme, re.M | re.S)
+          notlar = (m.group(1).strip() if m else "") + "\n\n**İndirme:** Windows için `UYAP.Evrak.Asistani.exe`, Mac (Apple Silicon) için `UYAP.Evrak.Asistani-macOS.zip`."
+          open("notlar.md", "w", encoding="utf-8").write(notlar)
+          EOF
+
+      - name: Taslak sürüm oluştur
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" --notes-file notlar.md \
+            dosyalar/UYAP.Evrak.Asistani.exe dosyalar/UYAP.Evrak.Asistani-macOS.zip

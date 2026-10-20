@@ -1,6 +1,6 @@
 # ⚖️ UYAP Evrak Asistanı (PRO)
 
-[![Sürüm](https://img.shields.io/badge/s%C3%BCr%C3%BCm-v2.0.1-blue.svg)](https://github.com/tolunayakay/uyap-evrak-asistani/releases)
+[![Sürüm](https://img.shields.io/badge/s%C3%BCr%C3%BCm-v2.1.0-blue.svg)](https://github.com/tolunayakay/uyap-evrak-asistani/releases)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![GUI Framework](https://img.shields.io/badge/GUI-CustomTkinter-blueviolet.svg)](https://github.com/TomSchimansky/CustomTkinter)
 [![Yerel AI](https://img.shields.io/badge/AI-Gemma%204%20E2B%20%28yerel%29-orange.svg)](https://huggingface.co/google/gemma-4-E2B-it)
@@ -65,13 +65,18 @@
 * **Tema:** Açık / Koyu tema; seçim hatırlanır.
 * **Kaşe ve Filigran Hafızası:** Avukat bilgisi, kaşe unvanı, konum, renk ve filigran tercihleri saklanır.
 * **Otomatik Güncelleme Denetimi:** Açılışta GitHub'da yeni sürüm olup olmadığını kontrol eder (kapatılabilir).
-* **Sessiz Yapılandırma:** Tercihler, çalışma klasöründe dosya kalabalığı yaratmadan Windows'un yerel uygulama veri alanında (`%APPDATA%\UyapAsistani`) saklanır.
+* **Sessiz Yapılandırma:** Tercihler, çalışma klasöründe dosya kalabalığı yaratmadan Windows'un yerel uygulama veri alanında (`%APPDATA%\UyapAsistani`), macOS'ta `~/Library/Application Support/UyapAsistani` klasöründe saklanır.
 
 ---
 
 ## 🚀 Sürüm Geçmişi
 
-### 🆕 v2.0.1 Düzeltmeleri
+### 🆕 v2.1.0: macOS Desteği
+* **🍎 macOS Sürümü:** Uygulama artık Apple Silicon (M1 ve sonrası) Mac'lerde de çalışıyor. Windows ve Mac aynı koddan derleniyor; tüm özellikler iki sistemde de kullanılabilir.
+* **Mac'te AI Evrak Özeti:** Özetler Mac'in ekran kartında (**Metal**) üretilir; ayrıca bir kurulum gerekmez.
+* **Windows:** Davranış ve görünüm değişmedi.
+
+### v2.0.1 Düzeltmeleri
 * **Tema Geçişi:** Ayarlar penceresi açıldıktan sonra üst kısımdaki ☀/🌙 anahtarıyla koyu temadan açık temaya dönülememesi düzeltildi.
 * **Geliştiriciler İçin:** `pip install -r requirements.txt` artık AI kütüphanesini (llama-cpp-python) derleyici gerektirmeden, hazır paketle kuruyor.
 
@@ -98,20 +103,33 @@
 
 Uygulama **taşınabilir (portable)** yapıdadır; kurulum, yönetici yetkisi veya ek program gerektirmez.
 
+**Windows**
 1. Sağ taraftaki **Releases** sekmesine gidin.
 2. En güncel sürümün altındaki **Assets** bölümünden `UYAP.Evrak.Asistani.exe` dosyasını indirin.
 3. Çift tıklayarak doğrudan kullanmaya başlayın.
 
 > İlk açılışta Windows SmartScreen "Windows bilgisayarınızı korudu" uyarısı gösterebilir. **Ek bilgi ➔ Yine de çalıştır** ile açabilirsiniz.
 
+**macOS (Apple Silicon)**
+1. **Releases** sekmesinden `UYAP.Evrak.Asistani-macOS.zip` dosyasını indirin ve çift tıklayarak açın.
+2. Çıkan **UYAP Evrak Asistanı** uygulamasını **Uygulamalar** klasörüne sürükleyin.
+3. Uygulamayı açın.
+
+> Uygulama Apple tarafından imzalanmadığı için ilk açılışta macOS "doğrulanamadı" uyarısı verir. **Sistem Ayarları ➔ Gizlilik ve Güvenlik** bölümünde, aşağıdaki **"Yine de Aç"** düğmesine basarak açabilirsiniz. Bu yalnızca ilk açılışta gerekir.
+
 ### Sistem Gereksinimleri
 | | Gereksinim |
 |---|---|
-| **İşletim sistemi** | Windows 10 / 11 (64 bit) |
+| **İşletim sistemi** | Windows 10 / 11 (64 bit) veya macOS 12 ve üzeri (Apple Silicon: M1 ve sonrası) |
 | **Bellek (RAM)** | 4 GB; AI Evrak Özeti için en az 8 GB önerilir |
 | **Disk** | ~85 MB (uygulama) + ~3,1 GB (isteğe bağlı AI modeli) |
 | **Ekran kartı** | Gerekli değil. AI özetini hızlandırmak için 4 GB+ belleğe sahip harici bir kart (NVIDIA / AMD / Intel, Vulkan destekli güncel sürücü) kullanılabilir |
 | **Microsoft Word** | Yalnızca *Word ➔ PDF* dönüştürme için gereklidir |
+
+### macOS
+Uygulama macOS'ta da (Apple Silicon, macOS 12 ve üzeri) çalışır. AI Evrak Özeti, Mac'in ekran kartını **Metal** ile kullanır; Ayarlar'daki *İşlem birimi* ile işlemciye geçilebilir.
+* **Word ➔ PDF:** Mac için Microsoft Word gerekir. İlk kullanımda macOS, Word'ü denetleme izni ister (Sistem Ayarları › Gizlilik ve Güvenlik › Otomasyon). Word bir klasöre ilk kez yazarken "Dosyaya Erişim İzni Ver" penceresi açabilir; **Seçin...** ile belgenin klasörünü seçip izin vermeniz yeterlidir.
+* **Ayarlar ve AI modeli:** `~/Library/Application Support/UyapAsistani` klasöründe saklanır. İnternetsiz kullanım için model dosyası bu klasördeki `models` klasörüne konulabilir.
 
 **İnternetsiz kullanım:** AI modelini başka bir bilgisayardan kopyalamak için `gemma-4-E2B-it-Q4_K_M.gguf` dosyasını hedef bilgisayarda `%APPDATA%\UyapAsistani\models\` klasörüne koymanız yeterlidir.
 
@@ -134,6 +152,31 @@ python -m PyInstaller --noconfirm "UYAP Evrak Asistanı.spec"
 * `ai_motor_hazirla.py`, ekran kartı desteği için resmî llama.cpp Vulkan DLL'lerini (sürümü sabit, SHA256 doğrulamalı) `ai_motor/` klasörüne indirir. Bu adım atlanırsa EXE yalnızca işlemciyle çalışır.
 * EXE'nin sürüm bilgisi, `uyap_asistan.py` içindeki `APP_VERSION` değerinden otomatik okunur.
 * Derlenen EXE'nin AI altyapısını doğrulamak için: `"UYAP Evrak Asistanı.exe" --ai-test sonuc.json`
+
+**macOS'ta çalıştırma ve .app derleme:**
+
+Xcode Command Line Tools gerekir (`xcode-select --install`). AI kütüphanesi kaynaktan, Metal desteğiyle derlenir.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+CMAKE_ARGS="-DGGML_METAL=on" pip install -r requirements-macos.txt
+python uyap_asistan.py
+```
+
+```bash
+pip install pyinstaller
+python -m PyInstaller --noconfirm "UYAP Evrak Asistanı (macOS).spec"
+```
+
+* Çıktı: `dist/UYAP Evrak Asistanı.app`. AI doğrulaması: `"dist/UYAP Evrak Asistanı.app/Contents/MacOS/UYAP Evrak Asistanı" --ai-test sonuc.json`
+* Uygulama imzasız olduğu için ilk açılışta macOS uyarı verir; **Sistem Ayarları ➔ Gizlilik ve Güvenlik ➔ Yine de Aç** ile açılabilir.
+
+**Sürüm yayınlama (otomatik):** `uyap_asistan.py` içindeki `APP_VERSION` güncellenip `v` ile başlayan bir etiket (ör. `v2.1.0`) gönderildiğinde, GitHub Actions Windows `.exe`'yi ve macOS `.app`'i derler, test eder ve ikisini bir **taslak** sürüm olarak Releases'e yükler. Taslak, kontrol edildikten sonra GitHub'da yayınlanır.
+
+```bash
+git tag v2.1.0
+git push origin v2.1.0
+```
 
 ---
 
