@@ -1,12 +1,14 @@
 # Sürüm yayınlama: "v" ile başlayan bir etiket (ör. v2.1.0) gönderildiğinde Windows .exe ve macOS .app
 # derlenir, kısa bir açılış testinden geçirilir ve ikisi TASLAK sürüm olarak Releases'e yüklenir.
-# Taslak, GitHub'da kontrol edildikten sonra elle yayınlanır. Elle başlatılırsa (workflow_dispatch)
-# yalnızca derleme yapılır, sürüm oluşturulmaz; dosyalar çalıştırmanın Artifacts bölümünden indirilebilir.
+# Taslak, GitHub'da kontrol edildikten sonra elle yayınlanır. main'e açılan Pull Request'lerde veya elle
+# başlatılınca yalnızca derleme ve test yapılır, sürüm oluşturulmaz; dosyalar Artifacts bölümünden indirilebilir.
 name: Sürüm derle ve yayınla
 
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:
