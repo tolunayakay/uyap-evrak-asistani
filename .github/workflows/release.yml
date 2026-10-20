@@ -84,6 +84,11 @@ jobs:
       - name: Açılış ve AI kütüphanesi testi
         run: |
           B="dist/UYAP Evrak Asistanı.app/Contents/MacOS/UYAP Evrak Asistanı"
+          # Ana programın SDK sürümü eskiyse Metal uyumluluk modunda çalışır ve AI özeti çöker (bkz. .spec)
+          SDK=$(otool -l "$B" | awk '/LC_BUILD_VERSION/{f=1} f&&/sdk/{print $2; exit}')
+          echo "Ana program SDK sürümü: $SDK"
+          [ "${SDK%%.*}" -ge 14 ] || { echo "Ana program SDK sürümü 14'ten eski: $SDK"; exit 1; }
+          codesign --verify --deep --strict "dist/UYAP Evrak Asistanı.app"
           "$B" --ai-test ai_test.json
           python -c "import json; d=json.load(open('ai_test.json')); assert d['kutuphane'], d; print('AI kütüphanesi', d['kutuphane'])"
           "$B" & P=$!
