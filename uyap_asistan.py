@@ -113,7 +113,7 @@ ctk.set_default_color_theme("blue")
 # ============================================================================
 # UYGULAMA VERSİYONU VE GITHUB GÜNCELLEME DENETLEYİCİSİ
 # ============================================================================
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 
 # GitHub bilgileri — kendi repo adresinize göre güncelleyin
 GITHUB_REPO_OWNER = "tolunayakay"          # GitHub kullanıcı adınız

@@ -1,6 +1,6 @@
 # ⚖️ UYAP Evrak Asistanı (PRO)
 
-[![Sürüm](https://img.shields.io/badge/s%C3%BCr%C3%BCm-v2.0.0-blue.svg)](https://github.com/tolunayakay/uyap-evrak-asistani/releases)
+[![Sürüm](https://img.shields.io/badge/s%C3%BCr%C3%BCm-v2.0.1-blue.svg)](https://github.com/tolunayakay/uyap-evrak-asistani/releases)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![GUI Framework](https://img.shields.io/badge/GUI-CustomTkinter-blueviolet.svg)](https://github.com/TomSchimansky/CustomTkinter)
 [![Yerel AI](https://img.shields.io/badge/AI-Gemma%204%20E2B%20%28yerel%29-orange.svg)](https://huggingface.co/google/gemma-4-E2B-it)
@@ -71,7 +71,11 @@
 
 ## 🚀 Sürüm Geçmişi
 
-### 🆕 v2.0.0 Yenilikleri
+### 🆕 v2.0.1 Düzeltmeleri
+* **Tema Geçişi:** Ayarlar penceresi açıldıktan sonra üst kısımdaki ☀/🌙 anahtarıyla koyu temadan açık temaya dönülememesi düzeltildi.
+* **Geliştiriciler İçin:** `pip install -r requirements.txt` artık AI kütüphanesini (llama-cpp-python) derleyici gerektirmeden, hazır paketle kuruyor.
+
+### v2.0.0 Yenilikleri
 * **✨ AI Evrak Özeti:** Listedeki PDF, Word ve UDF evrakları, bilgisayarda yerel olarak çalışan **Gemma 4 E2B** yapay zekâ modeliyle özetlenir; belge internete gönderilmez. Model (~3,1 GB) Ayarlar'dan bir kez indirilir.
 * **Belge Türüne Göre Özet:** Sözleşme, dilekçe, mahkeme kararı, ihtarname, bilirkişi raporu ve icra belgeleri otomatik algılanır; özet türe uygun başlıklarla çıkarılır (ör. sözleşmelerde davacı/davalı yerine kiraya veren/kiracı).
 * **Ekran Kartı Hızlandırma:** Ayarlar'daki *İşlem birimi* (Otomatik / İşlemci / Ekran Kartı) ile uygun bir harici ekran kartında özetler 3-5 kat hızlı üretilir; sorun çıkarsa otomatik olarak işlemciye dönülür.
