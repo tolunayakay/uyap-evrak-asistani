@@ -57,7 +57,7 @@ jobs:
           path: UYAP.Evrak.Asistani.exe
 
   macos:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 90
     env:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
