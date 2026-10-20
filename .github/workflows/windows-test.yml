@@ -1,11 +1,11 @@
-# macOS uyumluluk değişikliklerinin Windows'u bozmadığını doğrular.
+# Değişikliklerin Windows'u bozmadığını doğrular (main'e açılan her Pull Request'te çalışır).
 # Aynı testler GitHub'ın Windows sunucusunda hem main hem bu dal üzerinde çalıştırılıp karşılaştırılır,
 # ardından bu daldan Windows .exe derlenip denenir. Sonuç tablosu çalıştırmanın özet sayfasında görünür.
 name: Windows doğrulama
 
 on:
-  push:
-    branches: [feat/macos-uyumlulugu]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -58,7 +58,7 @@ jobs:
         continue-on-error: true
         run: python dal/.github/windows-test/windows_test.py ana sonuc/ana
 
-      - name: Testler - bu dal
+      - name: Testler - bu değişiklik
         continue-on-error: true
         run: python dal/.github/windows-test/windows_test.py dal sonuc/dal
 
@@ -66,7 +66,7 @@ jobs:
         continue-on-error: true
         run: python dal/.github/windows-test/ai_test.py ana sonuc/ana/ai.json
 
-      - name: AI özeti - bu dal
+      - name: AI özeti - bu değişiklik
         continue-on-error: true
         run: python dal/.github/windows-test/ai_test.py dal sonuc/dal/ai.json
 
