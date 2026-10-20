@@ -74,3 +74,22 @@ app = BUNDLE(
         'NSAppleEventsUsageDescription': 'Word belgelerini PDF\'e dönüştürmek için Microsoft Word kullanılır.',
     },
 )
+
+# PyInstaller, ana programın SDK sürümünü Python'unkine eşitliyor. Python.org Python'u eski bir SDK
+# (ör. 12.1) ile derlendiğinde macOS, Metal'i eski uyumluluk modunda çalıştırıyor ve AI özeti yeni
+# Mac'lerde (M4 vb.) "nil Metal pipeline" hatasıyla çöküyor. SDK bilgisi derleyen makinenin SDK'sına
+# yükseltilir (en düşük macOS sürümü değişmez) ve paket yeniden imzalanır.
+import os, subprocess
+_ana_program = os.path.join(DISTPATH, 'UYAP Evrak Asistanı.app', 'Contents', 'MacOS', 'UYAP Evrak Asistanı')
+_yapi = subprocess.run(['otool', '-l', _ana_program], capture_output=True, text=True).stdout
+_minos = re.search(r'minos (\S+)', _yapi).group(1)
+_sdk_eski = re.search(r'sdk (\S+)', _yapi).group(1)
+_sdk_yeni = subprocess.run(['xcrun', '--show-sdk-version'], capture_output=True, text=True).stdout.strip()
+if int(_sdk_eski.split('.')[0]) < 14:
+    subprocess.run(['xcrun', 'vtool', '-set-build-version', 'macos', _minos, _sdk_yeni, '-replace',
+                    '-output', _ana_program + '.tmp', _ana_program], check=True)
+    os.replace(_ana_program + '.tmp', _ana_program)
+    os.chmod(_ana_program, 0o755)
+    subprocess.run(['codesign', '--force', '--deep', '--sign', '-',
+                    os.path.join(DISTPATH, 'UYAP Evrak Asistanı.app')], check=True)
+    print(f"Ana program SDK sürümü {_sdk_eski} → {_sdk_yeni} (en düşük macOS {_minos})")
