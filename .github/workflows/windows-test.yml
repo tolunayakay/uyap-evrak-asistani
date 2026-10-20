@@ -83,6 +83,14 @@ jobs:
       - name: Karşılaştır
         run: python dal/.github/windows-test/karsilastir.py sonuc/ana sonuc/dal sonuc/exe/exe_sonuc.json
 
+      - name: Derlenen .exe'yi indirilebilir olarak sakla
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: UYAP-Evrak-Asistani-Windows-exe
+          path: dal/dist/UYAP Evrak Asistanı.exe
+          retention-days: 14
+
       - name: Sonuçları sakla
         if: always()
         uses: actions/upload-artifact@v4
