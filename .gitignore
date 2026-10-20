@@ -181,3 +181,4 @@ cython_debug/
 .cursorindexingignore
 # AI motoru (Vulkan) DLL'leri: 'python ai_motor_hazirla.py' ile üretilir
 ai_motor/
+*.spec
