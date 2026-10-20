@@ -1,3 +1,7 @@
+# llama_cpp_python'un hazır Windows paketi PyPI'da yok; resmi paket sunucusundan alınır
+# (py3-none-win_amd64: tüm Python 3 sürümleriyle uyumlu, derleyici gerektirmez)
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+--only-binary=llama_cpp_python
 customtkinter==6.0.0
 docx2pdf==0.1.8
 llama_cpp_python==0.3.36
