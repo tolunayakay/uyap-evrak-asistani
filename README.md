@@ -65,7 +65,7 @@
 * **Tema:** Açık / Koyu tema; seçim hatırlanır.
 * **Kaşe ve Filigran Hafızası:** Avukat bilgisi, kaşe unvanı, konum, renk ve filigran tercihleri saklanır.
 * **Otomatik Güncelleme Denetimi:** Açılışta GitHub'da yeni sürüm olup olmadığını kontrol eder (kapatılabilir).
-* **Sessiz Yapılandırma:** Tercihler, çalışma klasöründe dosya kalabalığı yaratmadan Windows'un yerel uygulama veri alanında (`%APPDATA%\UyapAsistani`) saklanır.
+* **Sessiz Yapılandırma:** Tercihler, çalışma klasöründe dosya kalabalığı yaratmadan Windows'un yerel uygulama veri alanında (`%APPDATA%\UyapAsistani`), macOS'ta `~/Library/Application Support/UyapAsistani` klasöründe saklanır.
 
 ---
 
@@ -113,6 +113,11 @@ Uygulama **taşınabilir (portable)** yapıdadır; kurulum, yönetici yetkisi ve
 | **Ekran kartı** | Gerekli değil. AI özetini hızlandırmak için 4 GB+ belleğe sahip harici bir kart (NVIDIA / AMD / Intel, Vulkan destekli güncel sürücü) kullanılabilir |
 | **Microsoft Word** | Yalnızca *Word ➔ PDF* dönüştürme için gereklidir |
 
+### macOS
+Uygulama macOS'ta da (Apple Silicon, macOS 12 ve üzeri) çalışır. AI Evrak Özeti, Mac'in ekran kartını **Metal** ile kullanır; Ayarlar'daki *İşlem birimi* ile işlemciye geçilebilir.
+* **Word ➔ PDF:** Mac için Microsoft Word gerekir. İlk kullanımda macOS, Word'ü denetleme izni ister (Sistem Ayarları › Gizlilik ve Güvenlik › Otomasyon).
+* **Ayarlar ve AI modeli:** `~/Library/Application Support/UyapAsistani` klasöründe saklanır. İnternetsiz kullanım için model dosyası bu klasördeki `models` klasörüne konulabilir.
+
 **İnternetsiz kullanım:** AI modelini başka bir bilgisayardan kopyalamak için `gemma-4-E2B-it-Q4_K_M.gguf` dosyasını hedef bilgisayarda `%APPDATA%\UyapAsistani\models\` klasörüne koymanız yeterlidir.
 
 ---
@@ -134,6 +139,24 @@ python -m PyInstaller --noconfirm "UYAP Evrak Asistanı.spec"
 * `ai_motor_hazirla.py`, ekran kartı desteği için resmî llama.cpp Vulkan DLL'lerini (sürümü sabit, SHA256 doğrulamalı) `ai_motor/` klasörüne indirir. Bu adım atlanırsa EXE yalnızca işlemciyle çalışır.
 * EXE'nin sürüm bilgisi, `uyap_asistan.py` içindeki `APP_VERSION` değerinden otomatik okunur.
 * Derlenen EXE'nin AI altyapısını doğrulamak için: `"UYAP Evrak Asistanı.exe" --ai-test sonuc.json`
+
+**macOS'ta çalıştırma ve .app derleme:**
+
+Xcode Command Line Tools gerekir (`xcode-select --install`). AI kütüphanesi kaynaktan, Metal desteğiyle derlenir.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+CMAKE_ARGS="-DGGML_METAL=on" pip install -r requirements-macos.txt
+python uyap_asistan.py
+```
+
+```bash
+pip install pyinstaller
+python -m PyInstaller --noconfirm "UYAP Evrak Asistanı (macOS).spec"
+```
+
+* Çıktı: `dist/UYAP Evrak Asistanı.app`. AI doğrulaması: `"dist/UYAP Evrak Asistanı.app/Contents/MacOS/UYAP Evrak Asistanı" --ai-test sonuc.json`
+* Uygulama imzasız olduğu için ilk açılışta macOS uyarı verebilir; **Sağ tık ➔ Aç** ile açılabilir.
 
 ---
 

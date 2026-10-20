@@ -49,12 +49,78 @@ except ImportError:
 
 
 # ============================================================================
+# PLATFORM (WINDOWS / MACOS) FARKLARI
+# ============================================================================
+IS_MAC = sys.platform == "darwin"
+
+# Arayüz yazı tipleri: Windows'ta Segoe UI / Consolas, macOS'ta sistem yazı tipi / Menlo
+ARAYUZ_FONTU = "Helvetica Neue" if IS_MAC else "Segoe UI"
+SABIT_GENISLIK_FONTU = "Menlo" if IS_MAC else "Consolas"
+
+
+if IS_MAC:
+    # macOS kaydetme penceresi, adı uzantısıyla yazılınca uzantıyı ikinci kez ekliyor (dilekce.pdf.pdf)
+    _asil_asksaveasfilename = filedialog.asksaveasfilename
+
+    def _mac_asksaveasfilename(**secenekler):
+        yol = _asil_asksaveasfilename(**secenekler)
+        uzanti = secenekler.get("defaultextension") or ""
+        if yol and uzanti and yol.lower().endswith((uzanti + uzanti).lower()):
+            yol = yol[:-len(uzanti)]
+        return yol
+
+    filedialog.asksaveasfilename = _mac_asksaveasfilename
+
+    # Bazı butonlar işlemin tamamını arka plan iş parçacığında çalıştırıyor ve pencereleri (kaydet, klasör,
+    # onay, değer girişi) oradan açıyor. macOS'ta Tk pencereleri ana iş parçacığı dışında açılınca hata
+    # veriyor; bu çağrılar ana iş parçacığına aktarılır ve sonuç beklenir.
+    def _ana_is_parcaciginda(fonksiyon):
+        def sarmal(*argumanlar, **secenekler):
+            kok = tk._default_root
+            if threading.current_thread() is threading.main_thread() or kok is None:
+                return fonksiyon(*argumanlar, **secenekler)
+            sonuc, bitti = {}, threading.Event()
+
+            def calistir():
+                try:
+                    sonuc["deger"] = fonksiyon(*argumanlar, **secenekler)
+                except BaseException as e:
+                    sonuc["hata"] = e
+                finally:
+                    bitti.set()
+
+            kok.after(0, calistir)
+            bitti.wait()
+            if "hata" in sonuc:
+                raise sonuc["hata"]
+            return sonuc.get("deger")
+        return sarmal
+
+    for _modul, _adlar in ((filedialog, ("asksaveasfilename", "askopenfilename", "askopenfilenames", "askdirectory")),
+                           (messagebox, ("showinfo", "showwarning", "showerror", "askyesno", "askokcancel", "askyesnocancel")),
+                           (simpledialog, ("askstring", "askinteger", "askfloat"))):
+        for _ad in _adlar:
+            setattr(_modul, _ad, _ana_is_parcaciginda(getattr(_modul, _ad)))
+
+
+def dosyayi_ac(yol: str):
+    """Dosyayı işletim sisteminin varsayılan uygulamasıyla açar."""
+    if os.name == "nt":
+        os.startfile(yol)
+    else:
+        import subprocess
+        subprocess.Popen(["open" if IS_MAC else "xdg-open", yol])
+
+
+# ============================================================================
 # GİZLİ AYAR YÖNETİCİSİ (APPDATA / CONFIG DİZİNİNDE SAKLAR)
 # ============================================================================
 def get_ayar_dosya_yolu() -> str:
     if os.name == 'nt':
         taban_dizin = os.environ.get('APPDATA', os.path.expanduser('~'))
         klasor = os.path.join(taban_dizin, 'UyapAsistani')
+    elif IS_MAC:
+        klasor = os.path.expanduser('~/Library/Application Support/UyapAsistani')
     else:
         klasor = os.path.expanduser('~/.config/uyap_asistani')
 
@@ -169,6 +235,8 @@ def sistem_turkce_font_bul():
         os.path.join(windir, "Fonts", "arial.ttf"),
         os.path.join(windir, "Fonts", "calibri.ttf"),
         os.path.join(windir, "Fonts", "segoeui.ttf"),
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/System/Library/Fonts/Helvetica.ttc"
     ]
@@ -779,6 +847,17 @@ def ai_cihaz_sec(mod, gpular):
     return aday["vk"], aday["ad"]
 
 
+def ai_metal_destekli() -> bool:
+    """macOS: kurulu llama-cpp-python Metal (ekran kartı) desteğiyle derlenmiş mi?"""
+    if not IS_MAC:
+        return False
+    try:
+        import llama_cpp
+        return bool(llama_cpp.llama_supports_gpu_offload())
+    except Exception:
+        return False
+
+
 def _ai_cihazlari_yaz(cikti):
     """Alt süreç: tüm Vulkan cihazlarını listeler."""
     import ctypes
@@ -835,6 +914,11 @@ class AiOzetMotoru:
         """(vulkan_no veya None, açıklama). Seçilen kart ilk kez kullanılacaksa alt süreçte doğrulanır."""
         ayarlar = ayarlari_yukle()
         mod = ayarlar.get("ai_islem_birimi", "otomatik")
+        if IS_MAC:
+            # Apple Silicon: llama.cpp Metal ile ekran kartını doğrudan kullanır (ayrı motor/doğrulama gerekmez)
+            if mod != "cpu" and ai_metal_destekli():
+                return "metal", "Apple ekran kartı (Metal)"
+            return None, "İşlemci (CPU)"
         if mod == "cpu" or not ai_motor_klasoru():
             return None, "İşlemci (CPU)"
         if durum_bildir:
@@ -857,8 +941,8 @@ class AiOzetMotoru:
     def yukle(cls, durum_bildir=None):
         if cls._llm is None:
             vk, aciklama = cls._cihaz_belirle(durum_bildir)
-            hazir = _ai_motoru_hazirla(vk)
-            if vk is not None and hazir["vk"] != vk:
+            hazir = _ai_motoru_hazirla(None if vk == "metal" else vk)
+            if vk is not None and vk != "metal" and hazir["vk"] != vk:
                 # Arka uçlar bu oturumda başka ayarla yüklendi; kart değişikliği yeniden başlatınca geçerli olur
                 vk, aciklama = None, "İşlemci (CPU) — kart değişikliği için uygulamayı yeniden başlatın"
             if durum_bildir:
@@ -2268,7 +2352,7 @@ class PdfGorselOnizlemePenceresi(ctk.CTkToplevel):
         self.lbl_sayfa_sayisi = ctk.CTkLabel(
             sol_bilgi,
             text=f"Toplam: {len(self.sayfa_durumlari)} Sayfa",
-            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=13, weight="bold"),
             text_color=("#0F172A", "#F8FAFC")
         )
         self.lbl_sayfa_sayisi.pack(side="left")
@@ -2276,7 +2360,7 @@ class PdfGorselOnizlemePenceresi(ctk.CTkToplevel):
         self.lbl_secim = ctk.CTkLabel(
             sol_bilgi,
             text="• 0 sayfa seçildi",
-            font=ctk.CTkFont(family="Segoe UI", size=12),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12),
             text_color=("#64748B", "#94A3B8")
         )
         self.lbl_secim.pack(side="left", padx=8)
@@ -2288,7 +2372,7 @@ class PdfGorselOnizlemePenceresi(ctk.CTkToplevel):
             sag_aksiyon,
             text="⟳ Seçilenleri 90° Döndür",
             command=self._secilenleri_dondur,
-            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"),
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
@@ -2300,7 +2384,7 @@ class PdfGorselOnizlemePenceresi(ctk.CTkToplevel):
             sag_aksiyon,
             text="🗑 Seçilenleri Sil",
             command=self._secilenleri_sil,
-            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"),
             fg_color=("#FEE2E2", "#7F1D1D"),
             hover_color=("#FECACA", "#991B1B"),
             text_color=("#991B1B", "#FCA5A5"),
@@ -2312,7 +2396,7 @@ class PdfGorselOnizlemePenceresi(ctk.CTkToplevel):
             sag_aksiyon,
             text="💾 Değişiklikleri Yeni PDF Olarak Kaydet",
             command=self._degisiklikleri_kaydet,
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
@@ -2334,7 +2418,7 @@ class PdfGorselOnizlemePenceresi(ctk.CTkToplevel):
         ctk.CTkLabel(
             alt_bar,
             text="💡 Tıklayarak seç • Sürükleyerek sıra değiştir • ⟳ Döndür • 🗑 Sil",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
             text_color=("#64748B", "#94A3B8")
         ).pack(side="left", padx=16)
 
@@ -2373,7 +2457,7 @@ class PdfGorselOnizlemePenceresi(ctk.CTkToplevel):
             ctk.CTkLabel(
                 self.scroll_frame,
                 text="Tüm sayfalar silindi!\nLütfen pencereyi kapatın veya işlemi iptal edin.",
-                font=ctk.CTkFont(family="Segoe UI", size=13),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=13),
                 text_color=("#94A3B8", "#64748B")
             ).pack(pady=100)
             return
@@ -2405,14 +2489,14 @@ class PdfGorselOnizlemePenceresi(ctk.CTkToplevel):
             chk_color = "#3B82F6" if is_selected else ("#94A3B8", "#64748B")
             lbl_chk = ctk.CTkLabel(
                 ust_satir, text=chk_text,
-                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
                 text_color=chk_color
             )
             lbl_chk.pack(side="left")
 
             lbl_no = ctk.CTkLabel(
                 ust_satir, text=f"Sayfa {sira_no + 1}",
-                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"),
                 text_color=("#0F172A", "#F8FAFC")
             )
             lbl_no.pack(side="right")
@@ -2685,6 +2769,12 @@ class ModernUyapAsistani(CTkDnD):
 
         self.dosyalar = []
         self.dosya_imza_durumlari = {}
+        if IS_MAC:
+            # Tk 9 macOS'ta ::tk::unsupported::MacWindowStyle'ı kaldırdı; tkinter.simpledialog (askstring)
+            # bunu çağırıp hata veriyor. Eksikse etkisiz bir karşılık tanımlanır, pencere normal açılır.
+            self.tk.eval('namespace eval ::tk::unsupported {}\n'
+                         'if {[info commands ::tk::unsupported::MacWindowStyle] eq ""} '
+                         '{proc ::tk::unsupported::MacWindowStyle args {}}')
         self._uygulama_ikonu_yukle()
         self._arayuz_olustur()
 
@@ -2701,6 +2791,16 @@ class ModernUyapAsistani(CTkDnD):
             self.after(3000, self._guncelleme_kontrolu_baslat)
 
     def _uygulama_ikonu_yukle(self):
+        if IS_MAC:
+            # macOS .ico desteklemez; pencere/Dock simgesi PNG'den ayarlanır
+            png = resource_path("logo.png")
+            if os.path.exists(png):
+                try:
+                    self._ikon_resmi = tk.PhotoImage(file=png)
+                    self.iconphoto(True, self._ikon_resmi)
+                except Exception:
+                    pass
+            return
         ico = resource_path("logo.ico")
         if os.path.exists(ico):
             try:
@@ -2734,14 +2834,14 @@ class ModernUyapAsistani(CTkDnD):
         ctk.CTkLabel(
             dialog,
             text="🚀  Yeni Sürüm Kullanılabilir!",
-            font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=15, weight="bold"),
             text_color=("#0F172A", "#F8FAFC")
         ).pack(pady=(22, 4))
 
         ctk.CTkLabel(
             dialog,
             text=f"Mevcut sürüm: v{APP_VERSION}   →   Yeni sürüm: v{bilgi['surum']}",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
             text_color=("#475569", "#94A3B8")
         ).pack(pady=(0, 12))
 
@@ -2758,14 +2858,14 @@ class ModernUyapAsistani(CTkDnD):
         ctk.CTkLabel(
             kart,
             text="Sürüm Notları:",
-            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"),
             text_color=("#334155", "#CBD5E1")
         ).pack(anchor="w", padx=12, pady=(8, 2))
 
         notlar_kutusu = ctk.CTkTextbox(
             kart,
             height=90,
-            font=ctk.CTkFont(family="Segoe UI", size=10),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10),
             fg_color="transparent",
             border_width=0
         )
@@ -2788,7 +2888,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(side="left", fill="x", expand=True, padx=(0, 6))
@@ -2800,7 +2900,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#E2E8F0", "#334155"),
             hover_color=("#CBD5E1", "#475569"),
             text_color=("#334155", "#F8FAFC"),
-            font=ctk.CTkFont(family="Segoe UI", size=12),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12),
             height=36,
             corner_radius=8
         ).pack(side="left", fill="x", expand=True)
@@ -2824,14 +2924,14 @@ class ModernUyapAsistani(CTkDnD):
         ctk.CTkLabel(
             logo_alani,
             text="⚖ UYAP Evrak Asistanı",
-            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=17, weight="bold"),
             text_color=("#0F172A", "#F8FAFC")
         ).pack(side="left")
 
         ctk.CTkLabel(
             logo_alani,
             text="PRO",
-            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"),
             fg_color=("#EEF2F6", "#334155"),
             text_color=("#475569", "#E2E8F0"),
             corner_radius=6,
@@ -2866,7 +2966,7 @@ class ModernUyapAsistani(CTkDnD):
             sag_aksiyon_frame,
             text="Nasıl Kullanılır?",
             command=self.rehber_penceresi_ac,
-            font=ctk.CTkFont(family="Segoe UI", size=12),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12),
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#334155", "#F8FAFC"),
@@ -2907,7 +3007,7 @@ class ModernUyapAsistani(CTkDnD):
         self.durum_etiketi = ctk.CTkLabel(
             alt_bar,
             text="Hazır. Evraklarınızı sol alana sürükleyebilir veya 'Dosya Ekle' ile seçebilirsiniz.",
-            font=ctk.CTkFont(family="Segoe UI", size=12),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12),
             text_color=("#64748B", "#94A3B8")
         )
         self.durum_etiketi.pack(side="left", padx=18)
@@ -2932,14 +3032,14 @@ class ModernUyapAsistani(CTkDnD):
         ctk.CTkLabel(
             sol_baslik_satir,
             text="İŞLENECEK DOSYALAR",
-            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"),
             text_color=("#94A3B8", "#64748B")
         ).pack(side="left")
 
         self.dosya_sayisi_badge = ctk.CTkLabel(
             sol_baslik_satir,
             text="0 dosya",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
             text_color=("#64748B", "#94A3B8")
         )
         self.dosya_sayisi_badge.pack(side="right")
@@ -2954,7 +3054,7 @@ class ModernUyapAsistani(CTkDnD):
         self.bos_bilgi_etiketi = ctk.CTkLabel(
             self.liste_frame,
             text="Belgeleri buraya sürükleyin\nveya aşağıdaki butondan ekleyin\n(PDF, Word, Görsel, UDF)\n\n💡 İpucu: PDF'e çift tıklayarak sayfalarını görsel önizleyebilirsiniz.",
-            font=ctk.CTkFont(family="Segoe UI", size=12),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12),
             text_color=("#94A3B8", "#64748B"),
             justify="center"
         )
@@ -2974,7 +3074,7 @@ class ModernUyapAsistani(CTkDnD):
             liste_alt_bar,
             text="➕ Dosya Ekle",
             command=self.dosya_ekle_dialog,
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
@@ -3066,11 +3166,22 @@ class ModernUyapAsistani(CTkDnD):
 
         self._sekme_renklerini_guncelle = _sekme_renklerini_guncelle
 
+        def _sekme_sec(ad):
+            if IS_MAC:
+                # CTkTabview.set eski sekmeyi 100 ms sonra gizliyor; macOS'ta (Tk 9) üstteki sekme
+                # gizlenince alttaki yeniden çizilmiyor ve eski içerik ekranda kalıyor. Önce gizle.
+                for sekme_adi, cerceve in self.tabview._tab_dict.items():
+                    if sekme_adi != ad:
+                        cerceve.grid_forget()
+            self.tabview.set(ad)
+
+        self._sekme_sec = _sekme_sec
+
         try:
             self.tabview._segmented_button.configure(
-                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
                 height=38,
-                command=lambda val: (self._sekme_renklerini_guncelle(val), self.tabview.set(val))
+                command=lambda val: (self._sekme_renklerini_guncelle(val), self._sekme_sec(val))
             )
         except Exception:
             pass
@@ -3155,7 +3266,7 @@ class ModernUyapAsistani(CTkDnD):
             def baslik(metin):
                 ctk.CTkLabel(
                     scrollable, text=metin,
-                    font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+                    font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"),
                     text_color=("#94A3B8", "#64748B")
                 ).pack(anchor="w", padx=16, pady=(14, 4))
 
@@ -3179,7 +3290,7 @@ class ModernUyapAsistani(CTkDnD):
             ctk.CTkLabel(
                 ust_satir,
                 text="🔄  Otomatik Güncelleme Denetimi",
-                font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=13, weight="bold"),
                 text_color=("#0F172A", "#F8FAFC")
             ).pack(side="left")
 
@@ -3210,7 +3321,7 @@ class ModernUyapAsistani(CTkDnD):
             ctk.CTkLabel(
                 k1,
                 text="Uygulama açılırken GitHub'dan yeni sürüm olup olmadığını\nkontrol eder. İnternet yoksa sessizce atlanır.",
-                font=ctk.CTkFont(family="Segoe UI", size=11),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
                 text_color=("#64748B", "#94A3B8"),
                 justify="left"
             ).pack(anchor="w", padx=14, pady=(0, 12))
@@ -3220,14 +3331,14 @@ class ModernUyapAsistani(CTkDnD):
             ctk.CTkLabel(
                 k2,
                 text="Manuel Güncelleme Kontrolü",
-                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
                 text_color=("#0F172A", "#F8FAFC")
             ).pack(anchor="w", padx=14, pady=(12, 2))
 
             ctk.CTkLabel(
                 k2,
                 text=f"Şu anki sürüm: v{APP_VERSION}",
-                font=ctk.CTkFont(family="Segoe UI", size=11),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
                 text_color=("#64748B", "#94A3B8")
             ).pack(anchor="w", padx=14, pady=(0, 8))
 
@@ -3238,7 +3349,7 @@ class ModernUyapAsistani(CTkDnD):
                 fg_color=("#0F172A", "#3B82F6"),
                 hover_color=("#1E293B", "#2563EB"),
                 text_color="#FFFFFF",
-                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
                 height=34,
                 corner_radius=8
             )
@@ -3256,13 +3367,13 @@ class ModernUyapAsistani(CTkDnD):
             ctk.CTkLabel(
                 tema_satir,
                 text="🌗  Karanlık Tema",
-                font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=13, weight="bold"),
                 text_color=("#0F172A", "#F8FAFC")
             ).pack(side="left")
             ctk.CTkLabel(
                 tema_satir,
                 text="(Başlık switch'i ile de değiştirilebilir)",
-                font=ctk.CTkFont(family="Segoe UI", size=10),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10),
                 text_color=("#94A3B8", "#64748B")
             ).pack(side="left", padx=8)
 
@@ -3291,7 +3402,7 @@ class ModernUyapAsistani(CTkDnD):
                 ctk.CTkLabel(
                     k4,
                     text=satir_metin,
-                    font=ctk.CTkFont(family="Segoe UI", size=satir_font_boyut),
+                    font=ctk.CTkFont(family=ARAYUZ_FONTU, size=satir_font_boyut),
                     text_color=("#334155", "#CBD5E1") if satir_font_boyut == 13
                     else ("#64748B", "#94A3B8")
                 ).pack(anchor="w", padx=14, pady=(8 if satir_font_boyut == 13 else 1, 0))
@@ -3305,7 +3416,7 @@ class ModernUyapAsistani(CTkDnD):
                 fg_color=("#E2E8F0", "#334155"),
                 hover_color=("#CBD5E1", "#475569"),
                 text_color=("#334155", "#F8FAFC"),
-                font=ctk.CTkFont(family="Segoe UI", size=11),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
                 height=30,
                 corner_radius=8
             ).pack(anchor="w", padx=14, pady=(6, 14))
@@ -3319,7 +3430,7 @@ class ModernUyapAsistani(CTkDnD):
                 ctk.CTkLabel(
                     k5,
                     text=f"- {isim}",
-                    font=ctk.CTkFont(family="Segoe UI", size=11),
+                    font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
                     text_color=("#64748B", "#94A3B8")
                 ).pack(anchor="w", padx=14, pady=(8 if n == 0 else 1, 10 if n == len(emegi_gecenler) - 1 else 0))
 
@@ -3367,7 +3478,7 @@ class ModernUyapAsistani(CTkDnD):
         ust.pack(fill="x", padx=14, pady=(12, 4))
         ctk.CTkLabel(
             ust, text="✨  AI Evrak Özeti",
-            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=13, weight="bold"),
             text_color=("#0F172A", "#F8FAFC")
         ).pack(side="left")
 
@@ -3382,8 +3493,8 @@ class ModernUyapAsistani(CTkDnD):
         ctk.CTkLabel(
             kart,
             text="Listedeki evrakların yanında 'AI Özet' butonu gösterir. Özet, internete\n"
-                 f"veri göndermeden bilgisayarınızda (CPU) çalışan {AI_MODEL_ADI} modeliyle üretilir.",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
+                 f"veri göndermeden bilgisayarınızda{'' if IS_MAC else ' (CPU)'} çalışan {AI_MODEL_ADI} modeliyle üretilir.",
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
             text_color=("#64748B", "#94A3B8"),
             justify="left"
         ).pack(anchor="w", padx=14, pady=(0, 6))
@@ -3391,7 +3502,7 @@ class ModernUyapAsistani(CTkDnD):
         if not ai_kutuphane_mevcut():
             ctk.CTkLabel(
                 kart, text="⚠ llama-cpp-python kütüphanesi bulunamadı; özellik kullanılamaz.",
-                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"),
                 text_color=("#B91C1C", "#F87171")
             ).pack(anchor="w", padx=14, pady=(0, 12))
             return
@@ -3402,7 +3513,7 @@ class ModernUyapAsistani(CTkDnD):
             boyut = os.path.getsize(ai_model_yolu()) / (1024 * 1024)
             ctk.CTkLabel(
                 kart, text=f"✅ Model indirildi ({boyut:,.0f} MB)".replace(",", "."),
-                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"),
                 text_color=("#166534", "#4ADE80")
             ).pack(anchor="w", padx=14, pady=(0, 6))
             ctk.CTkButton(
@@ -3411,13 +3522,13 @@ class ModernUyapAsistani(CTkDnD):
                 fg_color=("#FEE2E2", "#7F1D1D"),
                 hover_color=("#FECACA", "#991B1B"),
                 text_color=("#991B1B", "#FEE2E2"),
-                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
                 height=32, corner_radius=8
             ).pack(fill="x", padx=14, pady=(0, 14))
         else:
             ctk.CTkLabel(
                 kart, text=f"Model indirilmedi (yaklaşık {AI_MODEL_BOYUT_METNI}, tek seferlik).",
-                font=ctk.CTkFont(family="Segoe UI", size=11),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
                 text_color=("#64748B", "#94A3B8")
             ).pack(anchor="w", padx=14, pady=(0, 6))
             ctk.CTkButton(
@@ -3426,7 +3537,7 @@ class ModernUyapAsistani(CTkDnD):
                 fg_color=("#0F172A", "#3B82F6"),
                 hover_color=("#1E293B", "#2563EB"),
                 text_color="#FFFFFF",
-                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
                 height=32, corner_radius=8
             ).pack(fill="x", padx=14, pady=(0, 14))
 
@@ -3434,13 +3545,13 @@ class ModernUyapAsistani(CTkDnD):
         """Otomatik / İşlemci / Ekran Kartı seçimi ve algılanan kartların bilgisi."""
         satir = ctk.CTkFrame(kart, fg_color="transparent")
         satir.pack(fill="x", padx=14, pady=(4, 2))
-        ctk.CTkLabel(satir, text="İşlem birimi:", font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+        ctk.CTkLabel(satir, text="İşlem birimi:", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
                      text_color=("#0F172A", "#F8FAFC")).pack(side="left")
 
-        motor_var = ai_motor_klasoru() is not None
+        motor_var = ai_motor_klasoru() is not None or ai_metal_destekli()
         ad_to_kod = {v: k for k, v in AI_ISLEM_BIRIMLERI.items()}
         kayitli = self.ayarlar.get("ai_islem_birimi", "otomatik")
-        bilgi_lbl = ctk.CTkLabel(kart, text="", font=ctk.CTkFont(family="Segoe UI", size=11),
+        bilgi_lbl = ctk.CTkLabel(kart, text="", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
                                  text_color=("#64748B", "#94A3B8"), justify="left", wraplength=420)
 
         def bilgi_yaz(gpular=None):
@@ -3450,7 +3561,13 @@ class ModernUyapAsistani(CTkDnD):
             except tk.TclError:
                 return
             if not motor_var:
-                bilgi_lbl.configure(text="Bu sürümde ekran kartı desteği yok (ai_motor bulunamadı); işlemci kullanılır.")
+                bilgi_lbl.configure(text="Bu sürümde ekran kartı desteği yok (ai_motor bulunamadı); işlemci kullanılır."
+                                    if not IS_MAC else "Kurulu AI kütüphanesi Metal desteği içermiyor; işlemci kullanılır.")
+                return
+            if IS_MAC:
+                mod = self.ayarlar.get("ai_islem_birimi", "otomatik")
+                secilen = "İşlemci (CPU)" if mod == "cpu" else "Apple ekran kartı (Metal)"
+                bilgi_lbl.configure(text=f"Kullanılacak: {secilen}\n(Apple Silicon'da ekran kartı ile özetler belirgin şekilde daha hızlı üretilir.)")
                 return
             if gpular is None:
                 bilgi_lbl.configure(text="Ekran kartları algılanıyor...")
@@ -3479,14 +3596,14 @@ class ModernUyapAsistani(CTkDnD):
             self.durum_etiketi.configure(text=f"AI işlem birimi: {gorunen}")
 
         secici = ctk.CTkSegmentedButton(satir, values=list(AI_ISLEM_BIRIMLERI.values()), command=degisti,
-                                        height=28, font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"))
+                                        height=28, font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"))
         secici.set(AI_ISLEM_BIRIMLERI.get(kayitli, "Otomatik"))
         secici.pack(side="right")
         if not motor_var:
             secici.configure(state="disabled")
         bilgi_lbl.pack(anchor="w", padx=14, pady=(0, 8))
 
-        if not motor_var or _AI_GPU_ONBELLEK is not None:
+        if IS_MAC or not motor_var or _AI_GPU_ONBELLEK is not None:
             bilgi_yaz(_AI_GPU_ONBELLEK)
         else:
             bilgi_yaz(None)
@@ -3579,15 +3696,15 @@ class ModernUyapAsistani(CTkDnD):
         pencere.after(100, pencere.lift)
         self._ai_indirme_penceresi = pencere
 
-        ctk.CTkLabel(pencere, text="⬇  AI Modeli İndiriliyor", font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold")).pack(anchor="w", padx=20, pady=(18, 2))
-        ctk.CTkLabel(pencere, text=AI_MODEL_DOSYA_ADI, font=ctk.CTkFont(family="Segoe UI", size=11), text_color=("#64748B", "#94A3B8")).pack(anchor="w", padx=20)
+        ctk.CTkLabel(pencere, text="⬇  AI Modeli İndiriliyor", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=15, weight="bold")).pack(anchor="w", padx=20, pady=(18, 2))
+        ctk.CTkLabel(pencere, text=AI_MODEL_DOSYA_ADI, font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11), text_color=("#64748B", "#94A3B8")).pack(anchor="w", padx=20)
 
-        yuzde_lbl = ctk.CTkLabel(pencere, text="%0", font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"))
+        yuzde_lbl = ctk.CTkLabel(pencere, text="%0", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=22, weight="bold"))
         yuzde_lbl.pack(anchor="w", padx=20, pady=(12, 0))
         bar = ctk.CTkProgressBar(pencere, height=14)
         bar.set(0)
         bar.pack(fill="x", padx=20, pady=(4, 6))
-        detay_lbl = ctk.CTkLabel(pencere, text="Bağlanıyor...", font=ctk.CTkFont(family="Segoe UI", size=11), text_color=("#475569", "#CBD5E1"))
+        detay_lbl = ctk.CTkLabel(pencere, text="Bağlanıyor...", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11), text_color=("#475569", "#CBD5E1"))
         detay_lbl.pack(anchor="w", padx=20)
 
         iptal = threading.Event()
@@ -3730,41 +3847,41 @@ class ModernUyapAsistani(CTkDnD):
         pencere.minsize(520, 420)
         pencere.after(100, pencere.lift)
 
-        ctk.CTkLabel(pencere, text=f"✨  {ad}", font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold")).pack(anchor="w", padx=16, pady=(14, 0))
+        ctk.CTkLabel(pencere, text=f"✨  {ad}", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=14, weight="bold")).pack(anchor="w", padx=16, pady=(14, 0))
         bilgi = f"{len(ham_metin):,} karakter".replace(",", ".")
         if kirpildi:
             bilgi += "  •  Belge uzun olduğu için giriş, gelişme ve sonuç/hüküm bölümleri özetlendi."
-        ctk.CTkLabel(pencere, text=bilgi, font=ctk.CTkFont(family="Segoe UI", size=11), text_color=("#64748B", "#94A3B8"), wraplength=640, justify="left").pack(anchor="w", padx=16)
+        ctk.CTkLabel(pencere, text=bilgi, font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11), text_color=("#64748B", "#94A3B8"), wraplength=640, justify="left").pack(anchor="w", padx=16)
 
         tur_satir = ctk.CTkFrame(pencere, fg_color="transparent")
         tur_satir.pack(fill="x", padx=16, pady=(8, 0))
-        ctk.CTkLabel(tur_satir, text="Belge türü:", font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold")).pack(side="left")
+        ctk.CTkLabel(tur_satir, text="Belge türü:", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold")).pack(side="left")
         tur_menu = ctk.CTkOptionMenu(tur_satir, values=list(tur_adlari.values()), width=220, height=28,
-                                     font=ctk.CTkFont(family="Segoe UI", size=12))
+                                     font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12))
         tur_menu.set(tur_adlari[otomatik_tur])
         tur_menu.pack(side="left", padx=8)
-        tur_notu = ctk.CTkLabel(tur_satir, text="(otomatik algılandı)", font=ctk.CTkFont(family="Segoe UI", size=11),
+        tur_notu = ctk.CTkLabel(tur_satir, text="(otomatik algılandı)", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
                                 text_color=("#64748B", "#94A3B8"))
         tur_notu.pack(side="left")
         yeniden_btn = ctk.CTkButton(tur_satir, text="↻ Yeniden Özetle", width=130, height=28, state="disabled",
                                     fg_color=("#EDE9FE", "#4C1D95"), hover_color=("#DDD6FE", "#5B21B6"),
                                     text_color=("#5B21B6", "#EDE9FE"), corner_radius=6,
-                                    font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"))
+                                    font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"))
         yeniden_btn.pack(side="right")
 
-        durum_lbl = ctk.CTkLabel(pencere, text="Model yükleniyor...", font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"), text_color=("#1D4ED8", "#60A5FA"))
+        durum_lbl = ctk.CTkLabel(pencere, text="Model yükleniyor...", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"), text_color=("#1D4ED8", "#60A5FA"))
         durum_lbl.pack(anchor="w", padx=16, pady=(8, 2))
         bar = ctk.CTkProgressBar(pencere, mode="indeterminate", height=6)
         bar.pack(fill="x", padx=16)
         bar.start()
 
-        kutu = ctk.CTkTextbox(pencere, font=ctk.CTkFont(family="Segoe UI", size=13), wrap="word")
+        kutu = ctk.CTkTextbox(pencere, font=ctk.CTkFont(family=ARAYUZ_FONTU, size=13), wrap="word")
         kutu.pack(fill="both", expand=True, padx=16, pady=(10, 6))
 
         ctk.CTkLabel(
             pencere,
             text="⚠ AI özeti hata içerebilir; hukuki işlemlerde daima asıl belgeyi esas alın.",
-            font=ctk.CTkFont(family="Segoe UI", size=10), text_color=("#B45309", "#FBBF24")
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10), text_color=("#B45309", "#FBBF24")
         ).pack(anchor="w", padx=16)
 
         alt = ctk.CTkFrame(pencere, fg_color="transparent")
@@ -3912,7 +4029,7 @@ class ModernUyapAsistani(CTkDnD):
     def _sekme_birlestir_olustur(self):
         tab = self.tab_birlestir
 
-        ctk.CTkLabel(tab, text="SIKIŞTIRMA MODU", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 4))
+        ctk.CTkLabel(tab, text="SIKIŞTIRMA MODU", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 4))
         self.mod_secimi = ctk.StringVar(value="akilli_vektor")
 
         ctk.CTkRadioButton(
@@ -3920,7 +4037,7 @@ class ModernUyapAsistani(CTkDnD):
             text="Akıllı Mod (Metinleri Koru, Görselleri Sıkıştır)",
             variable=self.mod_secimi,
             value="akilli_vektor",
-            font=ctk.CTkFont(family="Segoe UI", size=12),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12),
             text_color=("#334155", "#F8FAFC")
         ).pack(anchor="w", pady=3)
 
@@ -3929,11 +4046,11 @@ class ModernUyapAsistani(CTkDnD):
             text="Agresif Raster (150 DPI Taranmış Evrak Küçültme)",
             variable=self.mod_secimi,
             value="maksimum_raster",
-            font=ctk.CTkFont(family="Segoe UI", size=12),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12),
             text_color=("#334155", "#F8FAFC")
         ).pack(anchor="w", pady=3)
 
-        ctk.CTkLabel(tab, text="BATES NUMARALANDIRMA", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(14, 4))
+        ctk.CTkLabel(tab, text="BATES NUMARALANDIRMA", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(14, 4))
         bates_frame = ctk.CTkFrame(
             tab,
             fg_color=("#F8FAFC", "#0F172A"),
@@ -3949,7 +4066,7 @@ class ModernUyapAsistani(CTkDnD):
             text="Sayfa Altına Numara Bas",
             variable=self.bates_aktif,
             command=self._bates_toggle,
-            font=ctk.CTkFont(family="Segoe UI", size=12),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12),
             text_color=("#334155", "#F8FAFC")
         )
         self.bates_switch.pack(side="left", padx=12, pady=10)
@@ -3958,7 +4075,7 @@ class ModernUyapAsistani(CTkDnD):
         self.bates_on_ek.insert(0, "EK-1")
         self.bates_on_ek.pack(side="right", padx=12)
 
-        ctk.CTkLabel(tab, text="EK LİSTESİ (FİHRİST)", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(14, 4))
+        ctk.CTkLabel(tab, text="EK LİSTESİ (FİHRİST)", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(14, 4))
         fihrist_frame = ctk.CTkFrame(
             tab,
             fg_color=("#F8FAFC", "#0F172A"),
@@ -3974,7 +4091,7 @@ class ModernUyapAsistani(CTkDnD):
             text="Ek Listesi Ekle",
             variable=self.fihrist_aktif,
             command=self._fihrist_toggle,
-            font=ctk.CTkFont(family="Segoe UI", size=12),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12),
             text_color=("#334155", "#F8FAFC")
         )
         self.fihrist_switch.pack(side="left", padx=12, pady=10)
@@ -3991,14 +4108,14 @@ class ModernUyapAsistani(CTkDnD):
             fihrist_frame,
             values=["Başa", "Sona"],
             height=28,
-            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"),
             command=lambda v: (self.ayarlar.update({"fihrist_konum": v}), ayar_kaydet("fihrist_konum", v))
         )
         self.fihrist_konum.set(kayitli_konum if kayitli_konum in ("Başa", "Sona") else "Başa")
         self.fihrist_konum.pack(side="right")
         self._fihrist_toggle(kaydet=False)
 
-        ctk.CTkLabel(tab, text="EYLEMLER", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(16, 6))
+        ctk.CTkLabel(tab, text="EYLEMLER", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(16, 6))
 
         ctk.CTkButton(
             tab,
@@ -4007,7 +4124,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=13, weight="bold"),
             height=40,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4019,7 +4136,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4031,7 +4148,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4042,7 +4159,7 @@ class ModernUyapAsistani(CTkDnD):
     def _sekme_duzenle_olustur(self):
         tab = self.tab_duzenle
 
-        ctk.CTkLabel(tab, text="GÖRSEL SAYFA YÖNETİMİ", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 6))
+        ctk.CTkLabel(tab, text="GÖRSEL SAYFA YÖNETİMİ", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 6))
 
         ctk.CTkButton(
             tab,
@@ -4051,12 +4168,12 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=38,
             corner_radius=8
         ).pack(fill="x", pady=4)
 
-        ctk.CTkLabel(tab, text="HIZLI SAYFA AYIRMA VE DÖNDÜRME", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(12, 6))
+        ctk.CTkLabel(tab, text="HIZLI SAYFA AYIRMA VE DÖNDÜRME", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(12, 6))
 
         ctk.CTkButton(
             tab,
@@ -4065,7 +4182,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4077,7 +4194,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4089,7 +4206,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4101,7 +4218,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4112,7 +4229,7 @@ class ModernUyapAsistani(CTkDnD):
     def _sekme_donusturucu_olustur(self):
         tab = self.tab_donusturucu
 
-        ctk.CTkLabel(tab, text="UYAP VE OFİS DÖNÜŞÜMLERİ", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 4))
+        ctk.CTkLabel(tab, text="UYAP VE OFİS DÖNÜŞÜMLERİ", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 4))
 
         ctk.CTkButton(
             tab,
@@ -4121,7 +4238,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=3)
@@ -4133,7 +4250,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=3)
@@ -4145,7 +4262,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=3)
@@ -4157,7 +4274,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=3)
@@ -4169,7 +4286,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=3)
@@ -4181,7 +4298,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=34,
             corner_radius=8
         ).pack(fill="x", pady=(6, 3))
@@ -4192,7 +4309,7 @@ class ModernUyapAsistani(CTkDnD):
     def _sekme_guvenlik_olustur(self):
         tab = self.tab_guvenlik
 
-        ctk.CTkLabel(tab, text="HUKUKİ İŞLEMLER VE GÜVENLİK", font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 6))
+        ctk.CTkLabel(tab, text="HUKUKİ İŞLEMLER VE GÜVENLİK", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"), text_color=("#94A3B8", "#64748B")).pack(anchor="w", pady=(4, 6))
 
         ctk.CTkButton(
             tab,
@@ -4201,7 +4318,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=38,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4213,7 +4330,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=38,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4225,7 +4342,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4237,7 +4354,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4249,7 +4366,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#F1F5F9", "#334155"),
             hover_color=("#E2E8F0", "#475569"),
             text_color=("#1E293B", "#F8FAFC"),
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(fill="x", pady=4)
@@ -4280,7 +4397,7 @@ class ModernUyapAsistani(CTkDnD):
             self.bos_bilgi_etiketi = ctk.CTkLabel(
                 self.liste_frame,
                 text="Belgeleri buraya sürükleyin\nveya aşağıdaki butondan ekleyin\n(PDF, Word, Görsel, UDF)\n\n💡 İpucu: PDF'e çift tıklayarak sayfalarını görsel önizleyebilirsiniz.",
-                font=ctk.CTkFont(family="Segoe UI", size=12),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12),
                 text_color=("#94A3B8", "#64748B"),
                 justify="center"
             )
@@ -4328,7 +4445,7 @@ class ModernUyapAsistani(CTkDnD):
             lbl_ad = ctk.CTkLabel(
                 sol_bilgi_box,
                 text=f"{simge}  {ad}",
-                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold" if is_selected else "normal"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold" if is_selected else "normal"),
                 text_color=("#0F172A", "#F8FAFC")
             )
             lbl_ad.pack(side="left")
@@ -4343,7 +4460,7 @@ class ModernUyapAsistani(CTkDnD):
                 lbl_imza = ctk.CTkLabel(
                     sol_bilgi_box,
                     text=rozet_metin,
-                    font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+                    font=ctk.CTkFont(family=ARAYUZ_FONTU, size=10, weight="bold"),
                     fg_color=("#DCFCE7", "#064E3B"),
                     text_color=("#166534", "#6EE7B7"),
                     corner_radius=4,
@@ -4355,7 +4472,7 @@ class ModernUyapAsistani(CTkDnD):
             lbl_boyut = ctk.CTkLabel(
                 satir,
                 text=f"{boyut_mb:.2f} MB",
-                font=ctk.CTkFont(family="Segoe UI", size=11),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
                 text_color=("#64748B", "#94A3B8")
             )
             lbl_boyut.pack(side="right", padx=10)
@@ -4372,7 +4489,7 @@ class ModernUyapAsistani(CTkDnD):
                     fg_color=("#EDE9FE", "#4C1D95"),
                     hover_color=("#DDD6FE", "#5B21B6"),
                     text_color=("#5B21B6", "#EDE9FE"),
-                    font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                    font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"),
                     corner_radius=6
                 ).pack(side="right", padx=(0, 2))
 
@@ -4549,6 +4666,8 @@ class ModernUyapAsistani(CTkDnD):
 
         if TURKCE_FONT_YOLU:
             kalin_yol = os.path.join(os.path.dirname(TURKCE_FONT_YOLU), "arialbd.ttf")
+            if not os.path.exists(kalin_yol):
+                kalin_yol = os.path.join(os.path.dirname(TURKCE_FONT_YOLU), "Arial Bold.ttf")   # macOS
             if not os.path.exists(kalin_yol):
                 kalin_yol = TURKCE_FONT_YOLU
             font_n = pymupdf.Font(fontfile=TURKCE_FONT_YOLU)
@@ -4902,7 +5021,7 @@ class ModernUyapAsistani(CTkDnD):
         dialog.resizable(False, False)
         dialog.after(100, dialog.lift)
 
-        ctk.CTkLabel(dialog, text=f"Toplam Sayfa: {toplam_sayfa}", font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold")).pack(pady=(14, 6))
+        ctk.CTkLabel(dialog, text=f"Toplam Sayfa: {toplam_sayfa}", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=13, weight="bold")).pack(pady=(14, 6))
 
         derece_var = ctk.IntVar(value=90)
         radio_bar = ctk.CTkFrame(dialog, fg_color="transparent")
@@ -4912,7 +5031,7 @@ class ModernUyapAsistani(CTkDnD):
         ctk.CTkRadioButton(radio_bar, text="90° Sola", variable=derece_var, value=270).pack(side="left", padx=8)
         ctk.CTkRadioButton(radio_bar, text="180°", variable=derece_var, value=180).pack(side="left", padx=8)
 
-        ctk.CTkLabel(dialog, text="Döndürülecek Sayfalar (Örn: 1-3, 5 | Boşsa tümü):", font=ctk.CTkFont(family="Segoe UI", size=11)).pack(pady=(10, 2))
+        ctk.CTkLabel(dialog, text="Döndürülecek Sayfalar (Örn: 1-3, 5 | Boşsa tümü):", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11)).pack(pady=(10, 2))
         aralik_entry = ctk.CTkEntry(dialog, width=280)
         aralik_entry.pack(pady=2)
 
@@ -5110,8 +5229,8 @@ class ModernUyapAsistani(CTkDnD):
         dialog.resizable(False, False)
         dialog.after(100, dialog.lift)
 
-        ctk.CTkLabel(dialog, text="📋 UYAP Şablon Editörüne Aktarma", font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold")).pack(pady=(16, 4))
-        ctk.CTkLabel(dialog, text=os.path.basename(kaynak_yol), font=ctk.CTkFont(family="Segoe UI", size=11), text_color=("#64748B", "#94A3B8")).pack(pady=(0, 10))
+        ctk.CTkLabel(dialog, text="📋 UYAP Şablon Editörüne Aktarma", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=14, weight="bold")).pack(pady=(16, 4))
+        ctk.CTkLabel(dialog, text=os.path.basename(kaynak_yol), font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11), text_color=("#64748B", "#94A3B8")).pack(pady=(0, 10))
 
         mod_var = ctk.StringVar(value="metin")
         ctk.CTkRadioButton(dialog, text="Metin + Resimler (Düzenlenebilir Metin - Önerilen)", variable=mod_var, value="metin").pack(anchor="w", padx=24, pady=3)
@@ -5161,7 +5280,7 @@ class ModernUyapAsistani(CTkDnD):
 
                     if oto_ac_var.get():
                         try:
-                            os.startfile(hedef_yol)
+                            dosyayi_ac(hedef_yol)
                         except Exception:
                             pass
                 except Exception as e:
@@ -5176,7 +5295,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=36,
             corner_radius=8
         ).pack(pady=(16, 0), padx=24, fill="x")
@@ -5213,7 +5332,7 @@ class ModernUyapAsistani(CTkDnD):
                 self.durum_etiketi.configure(text=f"PDF ➔ Word tamamlandı: {ist['paragraf']} paragraf.")
                 messagebox.showinfo("Başarılı", f"PDF başarıyla Word formatına dönüştürüldü!\n\nAktarılan Paragraf: {ist['paragraf']}\nAktarılan Görsel: {ist['resim']}\nDosya: {os.path.basename(hedef_yol)}")
                 try:
-                    os.startfile(hedef_yol)
+                    dosyayi_ac(hedef_yol)
                 except Exception:
                     pass
             except Exception as e:
@@ -5371,8 +5490,13 @@ class ModernUyapAsistani(CTkDnD):
                         sys.stderr = io.StringIO()
                     try:
                         docx_to_pdf_convert(abs_kaynak, abs_hedef)
+                    except SystemExit:
+                        # docx2pdf macOS'ta hata olunca sys.exit(1) çağırıyor; uygulama kapanmasın
+                        raise RuntimeError("Microsoft Word belgeyi PDF'e dönüştüremedi.")
                     finally:
                         sys.stderr = eski_stderr
+                    if IS_MAC and not os.path.exists(abs_hedef):
+                        raise RuntimeError("Microsoft Word PDF dosyasını oluşturmadı.")
                 else:
                     raise RuntimeError("Microsoft Word veya docx2pdf motoruna erişilemedi.")
 
@@ -5382,7 +5506,12 @@ class ModernUyapAsistani(CTkDnD):
             messagebox.showerror(
                 "Dönüşüm Hatası",
                 f"Word ➔ PDF dönüştürme hatası:\n{str(e)}\n\n"
-                "Not: Bilgisayarınızda Microsoft Word yüklü olmalı ve arka planda açık olan Word pencereleri kapatılmalıdır."
+                + ("Not: Mac'inizde Microsoft Word yüklü olmalı ve ilk kullanımda çıkan \"Word'ü denetleme\" "
+                   "izni verilmelidir (Sistem Ayarları › Gizlilik ve Güvenlik › Otomasyon).\n\n"
+                   "Word \"Dosyaya Erişim İzni Ver\" penceresi açarsa \"Seçin...\" ile belgenin bulunduğu "
+                   "klasörü seçip \"Erişim İzni Ver\"e basın ve dönüştürmeyi tekrar deneyin."
+                   if IS_MAC else
+                   "Not: Bilgisayarınızda Microsoft Word yüklü olmalı ve arka planda açık olan Word pencereleri kapatılmalıdır.")
             )
         finally:
             if pythoncom is not None:
@@ -5425,7 +5554,7 @@ class ModernUyapAsistani(CTkDnD):
             pencere.geometry("640x500")
             pencere.after(100, pencere.lift)
 
-            txt = ctk.CTkTextbox(pencere, font=ctk.CTkFont(family="Consolas", size=12))
+            txt = ctk.CTkTextbox(pencere, font=ctk.CTkFont(family=SABIT_GENISLIK_FONTU, size=12))
             txt.pack(fill="both", expand=True, padx=16, pady=(16, 10))
             txt.insert("0.0", metin_icerik)
 
@@ -5471,14 +5600,14 @@ class ModernUyapAsistani(CTkDnD):
         ctk.CTkLabel(
             dialog,
             text="🔏 Belge Güvenlik ve İmza Doğrulama",
-            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=16, weight="bold"),
             text_color=("#0F172A", "#F8FAFC")
         ).pack(pady=(20, 2))
 
         ctk.CTkLabel(
             dialog,
             text=os.path.basename(kaynak_yol),
-            font=ctk.CTkFont(family="Segoe UI", size=11),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
             text_color=("#64748B", "#94A3B8")
         ).pack(pady=(0, 14))
 
@@ -5497,15 +5626,15 @@ class ModernUyapAsistani(CTkDnD):
         ctk.CTkLabel(
             kart,
             text=durum_baslik,
-            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=13, weight="bold"),
             text_color=durum_renk
         ).pack(anchor="w", padx=16, pady=(14, 6))
 
         def satir_ekle(etiket, deger):
             f = ctk.CTkFrame(kart, fg_color="transparent")
             f.pack(fill="x", padx=16, pady=3)
-            ctk.CTkLabel(f, text=etiket, font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"), text_color=("#475569", "#CBD5E1"), width=120, anchor="w").pack(side="left")
-            ctk.CTkLabel(f, text=deger or "-", font=ctk.CTkFont(family="Segoe UI", size=11), text_color=("#0F172A", "#F8FAFC"),
+            ctk.CTkLabel(f, text=etiket, font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"), text_color=("#475569", "#CBD5E1"), width=120, anchor="w").pack(side="left")
+            ctk.CTkLabel(f, text=deger or "-", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11), text_color=("#0F172A", "#F8FAFC"),
                          anchor="w", justify="left", wraplength=300).pack(side="left", fill="x", expand=True)
 
         def kisi_metni(i):
@@ -5543,7 +5672,7 @@ class ModernUyapAsistani(CTkDnD):
             fg_color=("#0F172A", "#3B82F6"),
             hover_color=("#1E293B", "#2563EB"),
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"),
             height=34,
             corner_radius=8
         ).pack(pady=(20, 0), padx=24, fill="x")
@@ -5565,19 +5694,19 @@ class ModernUyapAsistani(CTkDnD):
         dialog.resizable(False, False)
         dialog.after(100, dialog.lift)
 
-        ctk.CTkLabel(dialog, text="Kaşe Başlığı:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(12, 2))
+        ctk.CTkLabel(dialog, text="Kaşe Başlığı:", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold")).pack(anchor="w", padx=20, pady=(12, 2))
         baslik_entry = ctk.CTkEntry(dialog)
         baslik_entry.insert(0, self.ayarlar.get("kase_baslik", "ASLI GİBİDİR"))
         baslik_entry.pack(fill="x", padx=20)
 
-        ctk.CTkLabel(dialog, text="Avukat İsim / Sicil No / Unvan:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
+        ctk.CTkLabel(dialog, text="Avukat İsim / Sicil No / Unvan:", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
         avukat_entry = ctk.CTkEntry(dialog, placeholder_text="Av. Ad Soyad - Baro Sicil No")
         kayitli_avukat = self.ayarlar.get("avukat_bilgisi", "")
         if kayitli_avukat:
             avukat_entry.insert(0, kayitli_avukat)
         avukat_entry.pack(fill="x", padx=20)
 
-        ctk.CTkLabel(dialog, text="Tarih / Ek Açıklama:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
+        ctk.CTkLabel(dialog, text="Tarih / Ek Açıklama:", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
         ek_entry = ctk.CTkEntry(dialog)
         ek_entry.insert(0, f"Tarih: {bugun}")
         ek_entry.pack(fill="x", padx=20)
@@ -5586,7 +5715,7 @@ class ModernUyapAsistani(CTkDnD):
         konum_haritasi = {"Sağ Alt": "sag_alt", "Sol Alt": "sol_alt", "Alt Orta": "alt_orta", "Sağ Üst": "sag_ust"}
         konum_var = ctk.StringVar(value=konum_haritasi.get(kayitli_konum_gorunum, "sag_alt"))
 
-        ctk.CTkLabel(dialog, text="Konum:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
+        ctk.CTkLabel(dialog, text="Konum:", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold")).pack(anchor="w", padx=20, pady=(8, 2))
         konum_opt = ctk.CTkOptionMenu(
             dialog,
             values=["Sağ Alt", "Sol Alt", "Alt Orta", "Sağ Üst"],
@@ -5710,7 +5839,7 @@ class ModernUyapAsistani(CTkDnD):
         dialog.resizable(False, False)
         dialog.after(100, dialog.lift)
 
-        ctk.CTkLabel(dialog, text="Hazır Filigranlar:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(12, 4))
+        ctk.CTkLabel(dialog, text="Hazır Filigranlar:", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold")).pack(anchor="w", padx=20, pady=(12, 4))
 
         metin_entry = ctk.CTkEntry(dialog, placeholder_text="Filigran metnini yazın (Örn: TASLAKTIR)")
 
@@ -5730,18 +5859,18 @@ class ModernUyapAsistani(CTkDnD):
                 fg_color=("#F1F5F9", "#334155"),
                 hover_color=("#E2E8F0", "#475569"),
                 text_color=("#1E293B", "#F8FAFC"),
-                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"),
                 height=30,
                 corner_radius=6
             ).grid(row=i // 2, column=i % 2, columnspan=2 if i == len(hazir_metinler) - 1 and i % 2 == 0 else 1, sticky="ew", padx=3, pady=3)
 
-        ctk.CTkLabel(dialog, text="Filigran Metni (elle düzenlenebilir):", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(10, 2))
+        ctk.CTkLabel(dialog, text="Filigran Metni (elle düzenlenebilir):", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold")).pack(anchor="w", padx=20, pady=(10, 2))
         kayitli_metin = self.ayarlar.get("filigran_metin", "TASLAKTIR")
         if kayitli_metin:
             metin_entry.insert(0, kayitli_metin)
         metin_entry.pack(fill="x", padx=20)
 
-        ctk.CTkLabel(dialog, text="Renk:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(10, 2))
+        ctk.CTkLabel(dialog, text="Renk:", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold")).pack(anchor="w", padx=20, pady=(10, 2))
         renk_opt = ctk.CTkOptionMenu(dialog, values=list(renk_haritasi.keys()))
         kayitli_renk = self.ayarlar.get("filigran_renk", "Gri")
         renk_opt.set(kayitli_renk if kayitli_renk in renk_haritasi else "Gri")
@@ -5753,7 +5882,7 @@ class ModernUyapAsistani(CTkDnD):
             kayitli_opaklik = 0.25
         kayitli_opaklik = min(0.8, max(0.05, kayitli_opaklik))
 
-        opaklik_etiket = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"))
+        opaklik_etiket = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold"))
         opaklik_etiket.pack(anchor="w", padx=20, pady=(10, 2))
 
         def opaklik_guncelle(v):
@@ -5769,7 +5898,7 @@ class ModernUyapAsistani(CTkDnD):
             dialog,
             text="Metnin arkasına yerleştir (taranmış sayfalarda otomatik öne alınır)",
             variable=arkada_var,
-            font=ctk.CTkFont(family="Segoe UI", size=11)
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11)
         ).pack(anchor="w", padx=20, pady=(12, 4))
 
         aralik_entry = ctk.CTkEntry(dialog, placeholder_text="Sayfa No (Boşsa Tümü | Örn: 1, 3-5)")
@@ -5882,18 +6011,18 @@ class ModernUyapAsistani(CTkDnD):
         dialog.resizable(False, False)
         dialog.after(100, dialog.lift)
 
-        ctk.CTkLabel(dialog, text="🧹 Hassas Arka Plan Bilgilerini Temizle", font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold")).pack(anchor="w", padx=20, pady=(16, 4))
+        ctk.CTkLabel(dialog, text="🧹 Hassas Arka Plan Bilgilerini Temizle", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=15, weight="bold")).pack(anchor="w", padx=20, pady=(16, 4))
         ctk.CTkLabel(
             dialog,
             text="Yazar adı, son düzenleyen kullanıcı/bilgisayar, şirket, oluşturma tarihleri,\n"
                  "düzenleme süresi, şablon yolu, revizyon geçmişi ve değişiklik/yorum\n"
                  "yazarları silinir. Belgenin içeriği değişmez.",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
+            font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11),
             text_color=("#475569", "#CBD5E1"),
             justify="left"
         ).pack(anchor="w", padx=20)
 
-        ctk.CTkLabel(dialog, text="Kapsam:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(14, 2))
+        ctk.CTkLabel(dialog, text="Kapsam:", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold")).pack(anchor="w", padx=20, pady=(14, 2))
         kapsam_var = ctk.StringVar(value="secili" if secili else "tumu")
         secili_radio = ctk.CTkRadioButton(
             dialog,
@@ -5909,7 +6038,7 @@ class ModernUyapAsistani(CTkDnD):
             variable=kapsam_var, value="tumu"
         ).pack(anchor="w", padx=20, pady=3)
 
-        ctk.CTkLabel(dialog, text="Kayıt:", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).pack(anchor="w", padx=20, pady=(12, 2))
+        ctk.CTkLabel(dialog, text="Kayıt:", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11, weight="bold")).pack(anchor="w", padx=20, pady=(12, 2))
         kayit_var = ctk.StringVar(value="kopya")
         ctk.CTkRadioButton(dialog, text="Temiz kopya oluştur (temiz_ önekiyle, klasör seçilir)", variable=kayit_var, value="kopya").pack(anchor="w", padx=20, pady=3)
         ctk.CTkRadioButton(dialog, text="Orijinal dosyaların üzerine yaz", variable=kayit_var, value="uzerine").pack(anchor="w", padx=20, pady=3)
@@ -5982,9 +6111,9 @@ class ModernUyapAsistani(CTkDnD):
             ozet = f"{basarili} belge temizlendi" + (f", {hatali} belgede hata oluştu" if hatali else "") + "."
             if klasor:
                 ozet += f"\nKayıt klasörü: {klasor}"
-            ctk.CTkLabel(sonuc, text=ozet, font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"), justify="left").pack(anchor="w", padx=16, pady=(14, 6))
-            ctk.CTkLabel(sonuc, text="Silinen bilgiler:", font=ctk.CTkFont(family="Segoe UI", size=11), text_color=("#64748B", "#94A3B8")).pack(anchor="w", padx=16)
-            kutu = ctk.CTkTextbox(sonuc, font=ctk.CTkFont(family="Segoe UI", size=12))
+            ctk.CTkLabel(sonuc, text=ozet, font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"), justify="left").pack(anchor="w", padx=16, pady=(14, 6))
+            ctk.CTkLabel(sonuc, text="Silinen bilgiler:", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11), text_color=("#64748B", "#94A3B8")).pack(anchor="w", padx=16)
+            kutu = ctk.CTkTextbox(sonuc, font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12))
             kutu.pack(fill="both", expand=True, padx=16, pady=(4, 8))
             kutu.insert("0.0", "\n".join(rapor))
             kutu.configure(state="disabled")
@@ -6024,7 +6153,7 @@ class ModernUyapAsistani(CTkDnD):
         dialog.resizable(False, False)
         dialog.after(100, dialog.lift)
 
-        ctk.CTkLabel(dialog, text="Otomatik Karartma Seçenekleri", font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold")).pack(anchor="w", padx=20, pady=(14, 6))
+        ctk.CTkLabel(dialog, text="Otomatik Karartma Seçenekleri", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=13, weight="bold")).pack(anchor="w", padx=20, pady=(14, 6))
 
         var_tc = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(dialog, text="Resmi T.C. Kimlik Algoritmasıyla Doğrulanan Numaralar", variable=var_tc).pack(anchor="w", padx=20, pady=4)
@@ -6035,7 +6164,7 @@ class ModernUyapAsistani(CTkDnD):
         var_tel = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(dialog, text="Telefon Numaraları (05xx / +90)", variable=var_tel).pack(anchor="w", padx=20, pady=4)
 
-        ctk.CTkLabel(dialog, text="Özel Maskelenecek Kelimeler (Virgülle ayırın):", font=ctk.CTkFont(family="Segoe UI", size=11)).pack(anchor="w", padx=20, pady=(12, 2))
+        ctk.CTkLabel(dialog, text="Özel Maskelenecek Kelimeler (Virgülle ayırın):", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11)).pack(anchor="w", padx=20, pady=(12, 2))
         ozel_entry = ctk.CTkEntry(dialog, placeholder_text="Örn: Ahmet Yılmaz, Gizli Konu")
         ozel_entry.pack(fill="x", padx=20)
 
@@ -6169,10 +6298,10 @@ class ModernUyapAsistani(CTkDnD):
 
         ust = ctk.CTkFrame(pencere, fg_color="transparent")
         ust.pack(fill="x", padx=24, pady=(20, 8))
-        ctk.CTkLabel(ust, text="Nasıl Kullanılır?", font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
+        ctk.CTkLabel(ust, text="Nasıl Kullanılır?", font=ctk.CTkFont(family=ARAYUZ_FONTU, size=20, weight="bold"),
                      text_color=("#0F172A", "#F8FAFC")).pack(anchor="w")
         ctk.CTkLabel(ust, text="UYAP Evrak Asistanı'nın özellikleri",
-                     font=ctk.CTkFont(family="Segoe UI", size=12), text_color=("#64748B", "#94A3B8")).pack(anchor="w")
+                     font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12), text_color=("#64748B", "#94A3B8")).pack(anchor="w")
 
         govde = ctk.CTkScrollableFrame(pencere, fg_color="transparent")
         govde.pack(fill="both", expand=True, padx=12, pady=(0, 12))
@@ -6187,24 +6316,24 @@ class ModernUyapAsistani(CTkDnD):
             bas.pack(fill="x", padx=18, pady=(14, 2))
             ctk.CTkLabel(bas, text=str(no), width=26, height=26, corner_radius=13,
                          fg_color=("#0F172A", "#3B82F6"), text_color="#FFFFFF",
-                         font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold")).pack(side="left")
-            ctk.CTkLabel(bas, text=baslik, font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+                         font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold")).pack(side="left")
+            ctk.CTkLabel(bas, text=baslik, font=ctk.CTkFont(family=ARAYUZ_FONTU, size=16, weight="bold"),
                          text_color=("#0F172A", "#F8FAFC")).pack(side="left", padx=(10, 0))
-            ctk.CTkLabel(kart, text=alt_baslik, font=ctk.CTkFont(family="Segoe UI", size=12), height=18,
+            ctk.CTkLabel(kart, text=alt_baslik, font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12), height=18,
                          text_color=("#64748B", "#94A3B8")).pack(anchor="w", padx=(54, 18), pady=(0, 10))
 
             for m, (ad, aciklama) in enumerate(maddeler):
                 satir = ctk.CTkFrame(kart, fg_color="transparent")
                 satir.pack(fill="x", padx=(54, 18), pady=(0, 16 if m == len(maddeler) - 1 else 10))
-                ctk.CTkLabel(satir, text=ad, font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"), height=18,
+                ctk.CTkLabel(satir, text=ad, font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12, weight="bold"), height=18,
                              text_color=("#1E293B", "#E2E8F0"), anchor="w").pack(anchor="w")
-                lbl = ctk.CTkLabel(satir, text=aciklama, font=ctk.CTkFont(family="Segoe UI", size=12), height=18,
+                lbl = ctk.CTkLabel(satir, text=aciklama, font=ctk.CTkFont(family=ARAYUZ_FONTU, size=12), height=18,
                                    text_color=("#475569", "#94A3B8"), anchor="w", justify="left", wraplength=500)
                 lbl.pack(anchor="w", pady=(1, 0))
                 aciklama_etiketleri.append(lbl)
 
         ctk.CTkLabel(govde, text="💡 İpucu: Bir PDF'e çift tıklayarak sayfalarını hızlıca önizleyebilirsiniz.",
-                     font=ctk.CTkFont(family="Segoe UI", size=11), text_color=("#64748B", "#94A3B8")
+                     font=ctk.CTkFont(family=ARAYUZ_FONTU, size=11), text_color=("#64748B", "#94A3B8")
                      ).pack(anchor="w", padx=12, pady=(6, 12))
 
         # Pencere boyutu değişince açıklamalar yeni genişliğe göre satır kırsın.
@@ -6235,7 +6364,7 @@ def ai_oz_test(cikti_yolu: str):
         sonuc["kutuphane"] = llama_cpp.__version__
         motor = _AI_MOTOR_DURUMU and _AI_MOTOR_DURUMU.get("motor") == "vulkan" and ai_motor_klasoru()
         lib = motor or os.path.join(os.path.dirname(llama_cpp.__file__), "lib")
-        sonuc["dll_klasoru"] = sorted(f for f in os.listdir(lib) if f.endswith(".dll")) if os.path.isdir(lib) else None
+        sonuc["dll_klasoru"] = sorted(f for f in os.listdir(lib) if f.endswith((".dll", ".dylib"))) if os.path.isdir(lib) else None
         if sonuc["model_indirildi"]:
             sonuc["model_yuklendi"] = True
             r = llm.create_chat_completion(messages=[{"role": "user", "content": "Türkiye'nin başkenti neresidir? Tek kelimeyle cevap ver."}],
@@ -6252,8 +6381,15 @@ def ai_oz_test(cikti_yolu: str):
 
 
 if __name__ == "__main__":
+    if IS_MAC:
+        # Paketlenmiş .app'te multiprocessing yardımcı süreçleri (ör. docx2pdf/tqdm kilidinin başlattığı
+        # resource_tracker) uygulamanın kendisiyle başlatılır; bu çağrı olmadan ikinci bir pencere açılır.
+        import multiprocessing
+        multiprocessing.freeze_support()
     if len(sys.argv) >= 3 and sys.argv[1] == "--ai-test":
         ai_oz_test(sys.argv[2])
+        if IS_MAC:
+            AiOzetMotoru.bosalt()   # Metal: model bırakılmadan çıkılırsa llama.cpp çöküyor (aşağıya bkz.)
         sys.exit(0)
     # AI ekran kartı algılama / doğrulama alt süreçleri (penceresiz çalışır)
     if len(sys.argv) >= 3 and sys.argv[1] == "--ai-cihazlar":
@@ -6264,3 +6400,9 @@ if __name__ == "__main__":
         sys.exit(0)
     app = ModernUyapAsistani()
     app.mainloop()
+    if IS_MAC:
+        # macOS (Metal): model bellekteyken süreç kapanırsa llama.cpp çıkışta çöküyor (GGML_ASSERT).
+        # Önce model bırakılır; özet sürerken model kullanımda olduğundan süreç doğrudan sonlandırılır.
+        if getattr(app, "_ai_ozet_calisiyor", False):
+            os._exit(0)
+        AiOzetMotoru.bosalt()
