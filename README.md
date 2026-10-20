@@ -115,7 +115,7 @@ Uygulama **taşınabilir (portable)** yapıdadır; kurulum, yönetici yetkisi ve
 2. Çıkan **UYAP Evrak Asistanı** uygulamasını **Uygulamalar** klasörüne sürükleyin.
 3. Uygulamayı açın.
 
-> Uygulama Apple tarafından imzalanmadığı için ilk açılışta macOS "doğrulanamadı" uyarısı verir. **Sistem Ayarları ➔ Gizlilik ve Güvenlik** bölümünde, aşağıdaki **"Yine de Aç"** düğmesine basarak açabilirsiniz. Bu yalnızca ilk açılışta gerekir.
+> İlk açılışta macOS "doğrulanamadı" uyarısı verir ve Word ➔ PDF gibi bazı özellikler ilk kullanımda izin ister. Adım adım anlatım için aşağıdaki **🍎 macOS'ta İlk Kullanım ve İzinler** bölümüne bakın.
 
 ### Sistem Gereksinimleri
 | | Gereksinim |
@@ -126,12 +126,49 @@ Uygulama **taşınabilir (portable)** yapıdadır; kurulum, yönetici yetkisi ve
 | **Ekran kartı** | Gerekli değil. AI özetini hızlandırmak için 4 GB+ belleğe sahip harici bir kart (NVIDIA / AMD / Intel, Vulkan destekli güncel sürücü) kullanılabilir |
 | **Microsoft Word** | Yalnızca *Word ➔ PDF* dönüştürme için gereklidir |
 
-### macOS
-Uygulama macOS'ta da (Apple Silicon, macOS 12 ve üzeri) çalışır. AI Evrak Özeti, Mac'in ekran kartını **Metal** ile kullanır; Ayarlar'daki *İşlem birimi* ile işlemciye geçilebilir.
-* **Word ➔ PDF:** Mac için Microsoft Word gerekir. İlk kullanımda macOS, Word'ü denetleme izni ister (Sistem Ayarları › Gizlilik ve Güvenlik › Otomasyon). Word bir klasöre ilk kez yazarken "Dosyaya Erişim İzni Ver" penceresi açabilir; **Seçin...** ile belgenin klasörünü seçip izin vermeniz yeterlidir.
-* **Ayarlar ve AI modeli:** `~/Library/Application Support/UyapAsistani` klasöründe saklanır. İnternetsiz kullanım için model dosyası bu klasördeki `models` klasörüne konulabilir.
+**İnternetsiz kullanım:** AI modelini başka bir bilgisayardan kopyalamak için `gemma-4-E2B-it-Q4_K_M.gguf` dosyasını hedef bilgisayarda Windows'ta `%APPDATA%\UyapAsistani\models\`, Mac'te `~/Library/Application Support/UyapAsistani/models/` klasörüne koymanız yeterlidir.
 
-**İnternetsiz kullanım:** AI modelini başka bir bilgisayardan kopyalamak için `gemma-4-E2B-it-Q4_K_M.gguf` dosyasını hedef bilgisayarda `%APPDATA%\UyapAsistani\models\` klasörüne koymanız yeterlidir.
+### 🍎 macOS'ta İlk Kullanım ve İzinler
+
+Uygulama Apple Silicon (M1 ve sonrası) Mac'lerde, macOS 12 ve üzerinde çalışır. AI Evrak Özeti, Mac'in ekran kartını **Metal** ile kullanır; Ayarlar'daki *İşlem birimi* ile işlemciye geçilebilir.
+
+macOS, güvenlik gereği bazı adımlarda sizden onay ister. Aşağıdaki izinlerin her biri **yalnızca bir kez** verilir.
+
+**1. İlk açılış: "Apple doğrulayamadı" uyarısı**
+
+Uygulama Apple'ın ücretli geliştirici imzasını taşımadığı için macOS ilk açılışta *"UYAP Evrak Asistanı" açılamadı / Apple, kötü amaçlı yazılım içermediğini doğrulayamadı* uyarısı gösterir.
+1. Uyarıda **Bitti**'ye basın (**Çöp Sepeti'ne Taşı**'ya değil).
+2. **Sistem Ayarları ➔ Gizlilik ve Güvenlik** bölümünü açın ve sayfanın altına kaydırın.
+3. *"UYAP Evrak Asistanı" engellendi* yazısının yanındaki **Yine de Aç** düğmesine basın.
+4. Mac parolanızı veya Touch ID'yi isteyebilir; ardından açılan pencerede tekrar **Yine de Aç**'a basın.
+
+Sonraki açılışlarda bu uyarı çıkmaz.
+
+**2. Word ➔ PDF: Microsoft Word'ü denetleme izni**
+
+Word ➔ PDF dönüştürme, Mac'inizdeki Microsoft Word'ü kullanır (Word yüklü olmalıdır). İlk dönüştürmede macOS *"UYAP Evrak Asistanı", "Microsoft Word" uygulamasını denetlemek için erişim izni istiyor* diye sorar: **İzin Ver**'e basın.
+
+Yanlışlıkla **İzin Verme** dediyseniz: **Sistem Ayarları ➔ Gizlilik ve Güvenlik ➔ Otomasyon ➔ UYAP Evrak Asistanı** altında **Microsoft Word** anahtarını açın ve dönüştürmeyi tekrar deneyin.
+
+**3. Word ➔ PDF: Word'ün "Dosyaya Erişim İzni Ver" penceresi**
+
+Word, kendi güvenlik kuralı gereği bir klasördeki belgelere ilk kez erişirken **Dosyaya Erişim İzni Ver** penceresi açar. Bu pencere Word'e aittir ve arka planda açılabilir; dönüştürme bekliyor gibi görünürse Word penceresine bakın.
+1. **Seçin...** düğmesine basın.
+2. Açılan pencerede belgenin bulunduğu **klasörü** seçin ve **Erişim İzni Ver**'e basın.
+
+Aynı dönüştürmede bu pencere bir kez daha (PDF'in kaydedileceği yer için) çıkabilir. İzin verilen klasörlerde tekrar sorulmaz. Dönüştürme "Dönüşüm Hatası" ile biterse izni verdikten sonra yeniden deneyin.
+
+**4. Masaüstü, Belgeler ve İndirilenler klasörleri**
+
+macOS, uygulamanın bu klasörlerdeki dosyalara erişmesi için onay isteyebilir: **İzin Ver**'e basın. Sonradan değiştirmek için: **Sistem Ayarları ➔ Gizlilik ve Güvenlik ➔ Dosyalar ve Klasörler ➔ UYAP Evrak Asistanı**.
+
+**Ayarlar, AI modeli ve kaldırma**
+* Ayarlar ve AI modeli `~/Library/Application Support/UyapAsistani` klasöründe saklanır (Finder'da **Git ➔ Klasöre Git...** ile bu adresi yazarak açabilirsiniz).
+* Uygulamayı kaldırmak için **Uygulamalar** klasöründen Çöp Sepeti'ne taşıyın; AI modeliyle birlikte tüm verileri silmek için yukarıdaki klasörü de silin.
+
+**Bilinen sınırlar**
+* Intel işlemcili Mac'ler desteklenmez.
+* Uyarı pencerelerindeki düğmeler macOS'ta İngilizce (**OK**, **Yes**, **No**) görünür; dosya açma ve kaydetme pencereleri Türkçedir.
 
 ---
 
